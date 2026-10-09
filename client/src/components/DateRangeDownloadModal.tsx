@@ -10,9 +10,12 @@ import {
   BookmarkCheck,
   Zap,
   Info,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { StorageSource, StorageFile } from '../types';
 import { formatBytes, formatDate } from '../utils/formatters';
+import { DateTimeRangePicker } from './DateTimeRangePicker';
 
 interface DateRangeDownloadModalProps {
   isOpen: boolean;
@@ -33,10 +36,11 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
   onStartDownload,
 }) => {
   const [activePreset, setActivePreset] = useState<string>('checkpoint');
-  const [startDateStr, setStartDateStr] = useState<string>('');
-  const [endDateStr, setEndDateStr] = useState<string>('');
+  const [startDate, setStartDate] = useState<Date | null>(null);
+  const [endDate, setEndDate] = useState<Date | null>(null);
   const [onlyMissing, setOnlyMissing] = useState(true);
   const [updateCheckpoint, setUpdateCheckpoint] = useState(true);
+  const [showManualInputs, setShowManualInputs] = useState(false);
 
   // Preview state
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -53,24 +57,21 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
     if (!isOpen) return;
 
     const now = new Date();
-    const nowIso = now.toISOString().slice(0, 16);
-    setEndDateStr(nowIso);
+    setEndDate(now);
 
     if (source.lastCheckpointMtime) {
       setActivePreset('checkpoint');
-      const cpDate = new Date(source.lastCheckpointMtime);
-      setStartDateStr(cpDate.toISOString().slice(0, 16));
+      setStartDate(new Date(source.lastCheckpointMtime));
     } else {
       setActivePreset('7d');
-      const past7d = new Date(Date.now() - 7 * 86400000);
-      setStartDateStr(past7d.toISOString().slice(0, 16));
+      setStartDate(new Date(Date.now() - 7 * 86400000));
     }
   }, [isOpen, source]);
 
   const applyPreset = (presetKey: string) => {
     setActivePreset(presetKey);
     const now = new Date();
-    setEndDateStr(now.toISOString().slice(0, 16));
+    setEndDate(now);
 
     let start = new Date();
     switch (presetKey) {
@@ -99,20 +100,26 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
       default:
         break;
     }
-    setStartDateStr(start.toISOString().slice(0, 16));
+    setStartDate(start);
+  };
+
+  const handlePickerChange = (newStart: Date, newEnd: Date) => {
+    setStartDate(newStart);
+    setEndDate(newEnd);
+    setActivePreset('custom');
   };
 
   // Fetch preview matching files count and size whenever dates or onlyMissing changes
   useEffect(() => {
     if (!isOpen || !source) return;
 
-    const startMs = startDateStr ? new Date(startDateStr).getTime() : undefined;
-    const endMs = endDateStr ? new Date(endDateStr).getTime() : undefined;
+    const startMs = startDate ? startDate.getTime() : undefined;
+    const endMs = endDate ? endDate.getTime() : undefined;
 
     setPreviewLoading(true);
     const params = new URLSearchParams();
-    if (startMs) params.append('startDate', startMs.toString());
-    if (endMs) params.append('endDate', endMs.toString());
+    if (startMs !== undefined) params.append('startDate', startMs.toString());
+    if (endMs !== undefined) params.append('endDate', endMs.toString());
     params.append('onlyMissing', onlyMissing ? 'true' : 'false');
 
     const timer = setTimeout(() => {
@@ -126,7 +133,7 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
     }, 200);
 
     return () => clearTimeout(timer);
-  }, [isOpen, source, startDateStr, endDateStr, onlyMissing]);
+  }, [isOpen, source, startDate, endDate, onlyMissing]);
 
   if (!isOpen) return null;
 
@@ -134,8 +141,8 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
     e.preventDefault();
     setSubmitting(true);
     try {
-      const startMs = startDateStr ? new Date(startDateStr).getTime() : undefined;
-      const endMs = endDateStr ? new Date(endDateStr).getTime() : undefined;
+      const startMs = startDate ? startDate.getTime() : undefined;
+      const endMs = endDate ? endDate.getTime() : undefined;
 
       await onStartDownload({
         startDate: startMs,
@@ -254,39 +261,80 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
             </div>
           </div>
 
-          {/* Date Range Pickers */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-cyan-400" />
-                Modified After (Start Date &amp; Time)
-              </label>
-              <input
-                type="datetime-local"
-                value={startDateStr}
-                onChange={(e) => {
-                  setStartDateStr(e.target.value);
-                  setActivePreset('custom');
-                }}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
+          {/* Interactive Date & Time Picker */}
+          <div>
+            <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2.5 flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                Select Date &amp; Time Range
+              </span>
+              <span className="text-[10px] text-slate-400 font-normal">
+                Click start date, then click end date
+              </span>
+            </label>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-cyan-400" />
-                Modified Before (End Date &amp; Time)
-              </label>
-              <input
-                type="datetime-local"
-                value={endDateStr}
-                onChange={(e) => {
-                  setEndDateStr(e.target.value);
-                  setActivePreset('custom');
-                }}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
+            <DateTimeRangePicker
+              startDate={startDate}
+              endDate={endDate}
+              onChange={handlePickerChange}
+              checkpointTimestamp={source.lastCheckpointMtime}
+            />
+          </div>
+
+          {/* Optional manual override toggle */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShowManualInputs(!showManualInputs)}
+              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-cyan-400 transition-colors"
+            >
+              {showManualInputs ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+              <span>{showManualInputs ? 'Hide manual timestamp fields' : 'Manual ISO datetime override'}</span>
+            </button>
+
+            {showManualInputs && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2.5 p-3.5 bg-slate-950/60 border border-slate-800 rounded-xl">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                    Start Datetime (ISO)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={startDate ? new Date(startDate.getTime() - startDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setStartDate(new Date(e.target.value));
+                        setActivePreset('custom');
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                    End Datetime (ISO)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={endDate ? new Date(endDate.getTime() - endDate.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setEndDate(new Date(e.target.value));
+                        setActivePreset('custom');
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Options: Checkpoint & Missing Filter */}
