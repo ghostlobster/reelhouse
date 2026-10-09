@@ -45,6 +45,8 @@ interface HierarchyExplorerProps {
   setCategoryFilter: (cat: string) => void;
   searchQuery: string;
   setSearchQuery: (q: string) => void;
+  startDate?: Date | null;
+  endDate?: Date | null;
 }
 
 const CATEGORY_ICONS: Record<FileCategory, React.ReactNode> = {
@@ -66,6 +68,8 @@ export const HierarchyExplorer: React.FC<HierarchyExplorerProps> = ({
   setCategoryFilter,
   searchQuery,
   setSearchQuery,
+  startDate,
+  endDate,
 }) => {
   const [currentPrefix, setCurrentPrefix] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
@@ -87,10 +91,14 @@ export const HierarchyExplorer: React.FC<HierarchyExplorerProps> = ({
   const [showTreeSidebar, setShowTreeSidebar] = useState<boolean>(true);
   const [rootFolders, setRootFolders] = useState<HierarchyFolder[]>([]);
 
-  // Fetch root folders once for tree sidebar
+  // Fetch root folders for tree sidebar (updated on date change)
   useEffect(() => {
     if (!source) return;
-    fetch(`/api/sources/${source.id}/hierarchy?prefix=`)
+    const rootParams = new URLSearchParams({ prefix: '' });
+    if (startDate) rootParams.append('startDate', startDate.getTime().toString());
+    if (endDate) rootParams.append('endDate', endDate.getTime().toString());
+
+    fetch(`/api/sources/${source.id}/hierarchy?${rootParams.toString()}`)
       .then((r) => r.json())
       .then((data: HierarchyResponse) => {
         if (data && data.folders) {
@@ -98,9 +106,9 @@ export const HierarchyExplorer: React.FC<HierarchyExplorerProps> = ({
         }
       })
       .catch((err) => console.error('Failed to load root folders for tree:', err));
-  }, [source]);
+  }, [source, startDate, endDate]);
 
-  // Fetch current folder hierarchy on prefix change, category filter, or search
+  // Fetch current folder hierarchy on prefix change, category filter, search, or date range
   const loadHierarchy = async (prefixToLoad: string) => {
     if (!source) return;
     setLoading(true);
@@ -114,6 +122,9 @@ export const HierarchyExplorer: React.FC<HierarchyExplorerProps> = ({
         sortBy,
         sortOrder,
       });
+
+      if (startDate) params.append('startDate', startDate.getTime().toString());
+      if (endDate) params.append('endDate', endDate.getTime().toString());
 
       const res = await fetch(`/api/sources/${source.id}/hierarchy?${params.toString()}`);
       if (res.ok) {
@@ -142,7 +153,7 @@ export const HierarchyExplorer: React.FC<HierarchyExplorerProps> = ({
 
   useEffect(() => {
     loadHierarchy(currentPrefix);
-  }, [source, currentPrefix, categoryFilter, searchQuery, sortBy, sortOrder]);
+  }, [source, currentPrefix, categoryFilter, searchQuery, sortBy, sortOrder, startDate, endDate]);
 
   const navigateTo = (prefix: string) => {
     setCurrentPrefix(prefix);

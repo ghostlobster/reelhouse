@@ -232,6 +232,8 @@ export const fileRepo = {
     options: {
       category?: string;
       search?: string;
+      startDate?: number;
+      endDate?: number;
       limit?: number;
       offset?: number;
       sortBy?: string;
@@ -242,6 +244,8 @@ export const fileRepo = {
     const {
       category,
       search,
+      startDate,
+      endDate,
       limit = 100,
       offset = 0,
       sortBy = 'key',
@@ -265,6 +269,16 @@ export const fileRepo = {
     if (prefix) {
       whereClause += ' AND key LIKE ?';
       params.push(`${prefix}%`);
+    }
+
+    if (startDate !== undefined) {
+      whereClause += ' AND last_modified >= ?';
+      params.push(startDate);
+    }
+
+    if (endDate !== undefined) {
+      whereClause += ' AND last_modified <= ?';
+      params.push(endDate);
     }
 
     const countRow = db.prepare(`SELECT COUNT(*) as count FROM files ${whereClause}`).get(...params) as any;
@@ -299,6 +313,8 @@ export const fileRepo = {
       prefix?: string;
       category?: string;
       search?: string;
+      startDate?: number;
+      endDate?: number;
       limit?: number;
       offset?: number;
       sortBy?: string;
@@ -308,7 +324,7 @@ export const fileRepo = {
     const rawPrefix = options.prefix || '';
     // Normalize prefix: if empty or '/', normalize to ''; otherwise ensure it ends with '/'
     const prefix = rawPrefix && rawPrefix !== '/' ? (rawPrefix.endsWith('/') ? rawPrefix : rawPrefix + '/') : '';
-    const { category, search, limit = 200, offset = 0, sortBy = 'key', sortOrder = 'ASC' } = options;
+    const { category, search, startDate, endDate, limit = 200, offset = 0, sortBy = 'key', sortOrder = 'ASC' } = options;
 
     // Build breadcrumbs
     const breadcrumbs: HierarchyBreadcrumb[] = [{ name: 'Root', prefix: '' }];
@@ -331,7 +347,7 @@ export const fileRepo = {
 
     const len = prefix.length;
 
-    // Filter clauses for optional category and search
+    // Filter clauses for optional category, search, and date range
     let catClause = '';
     const catParams: any[] = [];
     if (category && category !== 'all') {
@@ -346,6 +362,17 @@ export const fileRepo = {
       searchParams.push(`%${search}%`);
     }
 
+    let dateClause = '';
+    const dateParams: any[] = [];
+    if (startDate !== undefined) {
+      dateClause += ' AND last_modified >= ?';
+      dateParams.push(startDate);
+    }
+    if (endDate !== undefined) {
+      dateClause += ' AND last_modified <= ?';
+      dateParams.push(endDate);
+    }
+
     // 1. Folders query
     let folderSql = '';
     const folderParams: any[] = [sourceId];
@@ -358,7 +385,7 @@ export const fileRepo = {
           SUM(size) as total_size,
           SUM(duration) as video_duration
         FROM files
-        WHERE source_id = ? AND INSTR(key, '/') > 0 ${catClause} ${searchClause}
+        WHERE source_id = ? AND INSTR(key, '/') > 0 ${catClause} ${searchClause} ${dateClause}
         GROUP BY folder_name
         ORDER BY folder_name ASC
       `;
@@ -370,14 +397,14 @@ export const fileRepo = {
           SUM(size) as total_size,
           SUM(duration) as video_duration
         FROM files
-        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') > 0 ${catClause} ${searchClause}
+        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') > 0 ${catClause} ${searchClause} ${dateClause}
         GROUP BY folder_name
         ORDER BY folder_name ASC
       `;
       folderParams.push(`${prefix}%`);
     }
 
-    folderParams.push(...catParams, ...searchParams);
+    folderParams.push(...catParams, ...searchParams, ...dateParams);
     const folderRows = db.prepare(folderSql).all(...folderParams) as any[];
 
     const folders: HierarchyFolder[] = folderRows
@@ -400,29 +427,29 @@ export const fileRepo = {
     const safeOrder = sortOrder === 'DESC' ? 'DESC' : 'ASC';
 
     if (!prefix) {
-      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause}`;
+      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause} ${dateClause}`;
       fileSql = `
         SELECT * FROM files
-        WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause}
+        WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause} ${dateClause}
         ORDER BY ${safeSort} ${safeOrder}
         LIMIT ? OFFSET ?
       `;
     } else {
-      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause}`;
+      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause} ${dateClause}`;
       fileSql = `
         SELECT * FROM files
-        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause}
+        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause} ${dateClause}
         ORDER BY ${safeSort} ${safeOrder}
         LIMIT ? OFFSET ?
       `;
       fileParams.push(`${prefix}%`);
     }
 
-    const countParams = [...fileParams, ...catParams, ...searchParams];
+    const countParams = [...fileParams, ...catParams, ...searchParams, ...dateParams];
     const totalFilesRow = db.prepare(countSql).get(...countParams) as any;
     const totalFiles = totalFilesRow ? totalFilesRow.count : 0;
 
-    const queryParams = [...fileParams, ...catParams, ...searchParams, limit, offset];
+    const queryParams = [...fileParams, ...catParams, ...searchParams, ...dateParams, limit, offset];
     const fileRows = db.prepare(fileSql).all(...queryParams) as any[];
     const files: StorageFile[] = fileRows.map(mapFileRow);
 

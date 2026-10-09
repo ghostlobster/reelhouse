@@ -31,6 +31,10 @@ export const App: React.FC = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 50;
 
+  // Browse Datetime Filter
+  const [browseStartDate, setBrowseStartDate] = useState<Date | null>(null);
+  const [browseEndDate, setBrowseEndDate] = useState<Date | null>(null);
+
   // Active Downloads & Scans
   const [activeDownloads, setActiveDownloads] = useState<DownloadTask[]>([]);
   const [isScanning, setIsScanning] = useState(false);
@@ -101,6 +105,9 @@ export const App: React.FC = () => {
         limit: pageSize.toString(),
         offset: ((currentPage - 1) * pageSize).toString(),
       });
+      if (browseStartDate) params.append('startDate', browseStartDate.getTime().toString());
+      if (browseEndDate) params.append('endDate', browseEndDate.getTime().toString());
+
       const res = await fetch(`/api/sources/${sourceId}/files?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
@@ -138,7 +145,7 @@ export const App: React.FC = () => {
     if (activeSource) {
       fetchFiles(activeSource.id);
     }
-  }, [categoryFilter, searchQuery, sortBy, sortOrder, currentPage]);
+  }, [categoryFilter, searchQuery, sortBy, sortOrder, currentPage, browseStartDate, browseEndDate]);
 
   useEffect(() => {
     fetchDownloads();
@@ -453,6 +460,10 @@ export const App: React.FC = () => {
                 setCategoryFilter={setCategoryFilter}
                 searchQuery={searchQuery}
                 setSearchQuery={setSearchQuery}
+                startDate={browseStartDate}
+                setStartDate={setBrowseStartDate}
+                endDate={browseEndDate}
+                setEndDate={setBrowseEndDate}
                 sortBy={sortBy}
                 setSortBy={setSortBy}
                 sortOrder={sortOrder}

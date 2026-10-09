@@ -21,10 +21,16 @@ import {
   FolderOpen,
   FolderTree,
   List,
+  Calendar,
+  Clock,
+  Zap,
+  X,
+  RotateCcw,
 } from 'lucide-react';
 import { StorageFile, FileCategory, StorageSource } from '../types';
 import { formatBytes, formatDuration, formatDate } from '../utils/formatters';
 import { HierarchyExplorer } from './HierarchyExplorer';
+import { DateTimeRangePicker } from './DateTimeRangePicker';
 
 interface FileBrowserProps {
   source: StorageSource;
@@ -34,6 +40,10 @@ interface FileBrowserProps {
   setCategoryFilter: (cat: string) => void;
   searchQuery: string;
   setSearchQuery: (q: string) => void;
+  startDate?: Date | null;
+  setStartDate?: (date: Date | null) => void;
+  endDate?: Date | null;
+  setEndDate?: (date: Date | null) => void;
   sortBy: string;
   setSortBy: (sort: string) => void;
   sortOrder: 'ASC' | 'DESC';
@@ -64,6 +74,10 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   setCategoryFilter,
   searchQuery,
   setSearchQuery,
+  startDate,
+  setStartDate,
+  endDate,
+  setEndDate,
   sortBy,
   setSortBy,
   sortOrder,
@@ -78,6 +92,54 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   const [viewMode, setViewMode] = useState<'hierarchy' | 'flat'>('hierarchy');
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Datetime Range Filter State
+  const [activeDatePreset, setActiveDatePreset] = useState<string>('all');
+  const [isDatePickerModalOpen, setIsDatePickerModalOpen] = useState<boolean>(false);
+  const [tempStart, setTempStart] = useState<Date | null>(startDate || null);
+  const [tempEnd, setTempEnd] = useState<Date | null>(endDate || null);
+
+  const applyDatePreset = (preset: string) => {
+    setActiveDatePreset(preset);
+    const now = new Date();
+    if (!setStartDate || !setEndDate) return;
+
+    switch (preset) {
+      case 'all':
+        setStartDate(null);
+        setEndDate(null);
+        break;
+      case 'checkpoint':
+        if (source.lastCheckpointMtime) {
+          setStartDate(new Date(source.lastCheckpointMtime));
+          setEndDate(now);
+        } else {
+          setStartDate(new Date(Date.now() - 7 * 86400000));
+          setEndDate(now);
+        }
+        break;
+      case '24h':
+        setStartDate(new Date(Date.now() - 24 * 3600000));
+        setEndDate(now);
+        break;
+      case '7d':
+        setStartDate(new Date(Date.now() - 7 * 86400000));
+        setEndDate(now);
+        break;
+      case '30d':
+        setStartDate(new Date(Date.now() - 30 * 86400000));
+        setEndDate(now);
+        break;
+      default:
+        break;
+    }
+  };
+
+  const handleOpenCustomPicker = () => {
+    setTempStart(startDate || new Date(Date.now() - 7 * 86400000));
+    setTempEnd(endDate || new Date());
+    setIsDatePickerModalOpen(true);
+  };
 
   const toggleSelect = (key: string) => {
     const next = new Set(selectedKeys);
@@ -126,6 +188,8 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
     { id: 'code', label: 'Code & Data', icon: <Code className="w-3.5 h-3.5 text-blue-400" /> },
   ];
 
+  const isDateFilterActive = Boolean(startDate || endDate);
+
   return (
     <div className="space-y-4">
       {/* Top View Mode Switcher */}
@@ -165,6 +229,199 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
         </div>
       </div>
 
+      {/* Date & Time Range Filter Toolbar */}
+      <div className="bg-slate-900/80 border border-slate-800 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-md">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5 uppercase tracking-wider text-[10px]">
+            <Clock className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Modified Date Filter:</span>
+          </span>
+
+          {/* Quick Presets */}
+          <div className="flex items-center gap-1 flex-wrap">
+            <button
+              onClick={() => applyDatePreset('all')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border ${
+                activeDatePreset === 'all' && !isDateFilterActive
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-bold'
+                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              All Time
+            </button>
+
+            <button
+              onClick={() => applyDatePreset('checkpoint')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border flex items-center gap-1 ${
+                activeDatePreset === 'checkpoint'
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-bold'
+                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              <Zap className="w-3 h-3 text-cyan-400" />
+              <span>Since Checkpoint</span>
+              {source.lastCheckpointMtime && (
+                <span className="text-[10px] text-cyan-400/80 font-mono">
+                  ({formatDate(source.lastCheckpointMtime).slice(0, 10)})
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => applyDatePreset('24h')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border ${
+                activeDatePreset === '24h'
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-bold'
+                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              Past 24h
+            </button>
+
+            <button
+              onClick={() => applyDatePreset('7d')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border ${
+                activeDatePreset === '7d'
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-bold'
+                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              Past 7d
+            </button>
+
+            <button
+              onClick={() => applyDatePreset('30d')}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border ${
+                activeDatePreset === '30d'
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-bold'
+                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              Past 30d
+            </button>
+
+            <button
+              onClick={handleOpenCustomPicker}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors border flex items-center gap-1.5 ${
+                activeDatePreset === 'custom' || (isDateFilterActive && activeDatePreset !== 'checkpoint' && activeDatePreset !== '24h' && activeDatePreset !== '7d' && activeDatePreset !== '30d')
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-bold'
+                  : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              <Calendar className="w-3 h-3 text-cyan-400" />
+              <span>Custom Range...</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Active Range Indicator Pill */}
+        {isDateFilterActive && (
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 text-xs font-mono">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+              <span>
+                {startDate ? formatDate(startDate.getTime()) : 'Earliest'} →{' '}
+                {endDate ? formatDate(endDate.getTime()) : 'Now'}
+              </span>
+            </span>
+
+            <button
+              onClick={() => applyDatePreset('all')}
+              className="p-1 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
+              title="Reset date filter to All Time"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Custom Date Range Picker Modal */}
+      {isDatePickerModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-slate-950/80 backdrop-blur-md animate-in fade-in"
+          onClick={() => setIsDatePickerModalOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/60">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
+                  <Calendar className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Filter Browsing by Datetime Range</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Only files &amp; folders modified within this time window will be displayed
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsDatePickerModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto">
+              <DateTimeRangePicker
+                startDate={tempStart}
+                endDate={tempEnd}
+                onChange={(s, e) => {
+                  setTempStart(s);
+                  setTempEnd(e);
+                }}
+                checkpointTimestamp={source.lastCheckpointMtime}
+              />
+            </div>
+
+            <div className="flex items-center justify-between px-6 py-4 border-t border-slate-800 bg-slate-950/50">
+              <button
+                type="button"
+                onClick={() => {
+                  if (setStartDate && setEndDate) {
+                    setStartDate(null);
+                    setEndDate(null);
+                  }
+                  setActiveDatePreset('all');
+                  setIsDatePickerModalOpen(false);
+                }}
+                className="px-3.5 py-1.5 rounded-xl text-slate-400 hover:text-slate-200 text-xs font-medium transition-colors"
+              >
+                Reset to All Time
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsDatePickerModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (setStartDate && setEndDate) {
+                      setStartDate(tempStart);
+                      setEndDate(tempEnd);
+                      setActiveDatePreset('custom');
+                    }
+                    setIsDatePickerModalOpen(false);
+                  }}
+                  className="px-5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold shadow-md shadow-cyan-500/20 transition-all"
+                >
+                  Apply Date Filter
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {viewMode === 'hierarchy' ? (
         <HierarchyExplorer
           source={source}
@@ -175,6 +432,8 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
           setCategoryFilter={setCategoryFilter}
           searchQuery={searchQuery}
           setSearchQuery={setSearchQuery}
+          startDate={startDate}
+          endDate={endDate}
         />
       ) : (
         <>

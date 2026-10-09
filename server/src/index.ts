@@ -215,9 +215,14 @@ app.get('/api/sources/:id/metrics', (req: Request, res: Response) => {
 app.get('/api/sources/:id/files', (req: Request, res: Response) => {
   try {
     const { category, search, limit, offset, sortBy, sortOrder, prefix } = req.query;
+    const startDate = req.query.startDate ? parseInt(req.query.startDate as string, 10) : undefined;
+    const endDate = req.query.endDate ? parseInt(req.query.endDate as string, 10) : undefined;
+
     const result = fileRepo.getBySource(req.params.id, {
       category: category as string,
       search: search as string,
+      startDate,
+      endDate,
       limit: limit ? parseInt(limit as string, 10) : 50,
       offset: offset ? parseInt(offset as string, 10) : 0,
       sortBy: sortBy as string,
@@ -237,6 +242,8 @@ app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
     const prefix = (req.query.prefix as string) || '';
     const category = (req.query.category as string) || 'all';
     const search = (req.query.search as string) || '';
+    const startDate = req.query.startDate ? parseInt(req.query.startDate as string, 10) : undefined;
+    const endDate = req.query.endDate ? parseInt(req.query.endDate as string, 10) : undefined;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 200;
     const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
     const sortBy = (req.query.sortBy as string) || 'key';
@@ -251,6 +258,8 @@ app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
       prefix,
       category,
       search,
+      startDate,
+      endDate,
       limit,
       offset,
       sortBy,
