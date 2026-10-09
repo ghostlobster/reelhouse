@@ -19,9 +19,12 @@ import {
   Folder,
   ChevronRight,
   FolderOpen,
+  FolderTree,
+  List,
 } from 'lucide-react';
 import { StorageFile, FileCategory, StorageSource } from '../types';
 import { formatBytes, formatDuration, formatDate } from '../utils/formatters';
+import { HierarchyExplorer } from './HierarchyExplorer';
 
 interface FileBrowserProps {
   source: StorageSource;
@@ -72,6 +75,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   onDownloadFile,
   onBatchDownload,
 }) => {
+  const [viewMode, setViewMode] = useState<'hierarchy' | 'flat'>('hierarchy');
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -124,28 +128,78 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
 
   return (
     <div className="space-y-4">
-      {/* Search and Category Filters */}
-      <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 bg-slate-900/60 p-4 rounded-2xl border border-slate-800">
-        {/* Category Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
-          {categories.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => {
-                setCategoryFilter(c.id);
-                setCurrentPage(1);
-              }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
-                categoryFilter === c.id
-                  ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                  : 'bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent'
-              }`}
-            >
-              {c.icon}
-              <span>{c.label}</span>
-            </button>
-          ))}
+      {/* Top View Mode Switcher */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/60 p-2.5 rounded-2xl border border-slate-800 shadow-sm">
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setViewMode('hierarchy')}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              viewMode === 'hierarchy'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm shadow-cyan-500/10'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent'
+            }`}
+          >
+            <FolderTree className="w-3.5 h-3.5" />
+            <span>Folder Hierarchy (On-Demand)</span>
+          </button>
+
+          <button
+            onClick={() => setViewMode('flat')}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all ${
+              viewMode === 'flat'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm shadow-cyan-500/10'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800 border border-transparent'
+            }`}
+          >
+            <List className="w-3.5 h-3.5" />
+            <span>All Files (Flat Table)</span>
+          </button>
         </div>
+
+        <div className="text-[11px] text-slate-400 px-2 font-mono flex items-center gap-2">
+          {viewMode === 'hierarchy' ? (
+            <span>⚡ Loads folders &amp; files on click • Zero lag</span>
+          ) : (
+            <span>Total files indexed: <strong className="text-slate-200">{totalFiles}</strong></span>
+          )}
+        </div>
+      </div>
+
+      {viewMode === 'hierarchy' ? (
+        <HierarchyExplorer
+          source={source}
+          onPreviewFile={onPreviewFile}
+          onDownloadFile={onDownloadFile}
+          onBatchDownload={onBatchDownload}
+          categoryFilter={categoryFilter}
+          setCategoryFilter={setCategoryFilter}
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
+        />
+      ) : (
+        <>
+          {/* Search and Category Filters for Flat View */}
+          <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4 bg-slate-900/60 p-4 rounded-2xl border border-slate-800">
+            {/* Category Pills */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+              {categories.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => {
+                    setCategoryFilter(c.id);
+                    setCurrentPage(1);
+                  }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
+                    categoryFilter === c.id
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                      : 'bg-slate-800/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-transparent'
+                  }`}
+                >
+                  {c.icon}
+                  <span>{c.label}</span>
+                </button>
+              ))}
+            </div>
 
         {/* Search input */}
         <div className="relative min-w-[260px]">
@@ -433,6 +487,8 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
           </div>
         )}
       </div>
-    </div>
+    </>
+  )}
+</div>
   );
 };

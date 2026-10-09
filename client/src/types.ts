@@ -155,7 +155,7 @@ export interface DownloadBatch {
   id: string;
   sourceId: string;
   sourceName: string;
-  type: 'date_range' | 'manual_batch' | 'sync_all' | 'single';
+  type: 'date_range' | 'manual_batch' | 'sync_all' | 'single' | 'folder';
   startDate?: number;
   endDate?: number;
   filesCount: number;
@@ -166,6 +166,30 @@ export interface DownloadBatch {
   checkpointTimestamp?: number;
   createdAt: number;
   completedAt?: number;
+}
+
+export interface HierarchyFolder {
+  name: string;
+  prefix: string;
+  fileCount: number;
+  totalSize: number;
+  videoDuration: number;
+}
+
+export interface HierarchyBreadcrumb {
+  name: string;
+  prefix: string;
+}
+
+export interface HierarchyResponse {
+  currentPrefix: string;
+  parentPrefix: string | null;
+  breadcrumbs: HierarchyBreadcrumb[];
+  folders: HierarchyFolder[];
+  files: StorageFile[];
+  totalFolders: number;
+  totalFiles: number;
+  totalSize: number;
 }
 
 export interface DownloadTask {

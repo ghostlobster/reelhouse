@@ -10,7 +10,7 @@ import { storageService } from './services/storageService.js';
 import { scannerService } from './services/scannerService.js';
 import { metricsService } from './services/metricsService.js';
 import { downloadService } from './services/downloadService.js';
-import { StorageSource } from './types.js';
+import { StorageSource, DownloadBatch } from './types.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -225,6 +225,57 @@ app.get('/api/sources/:id/files', (req: Request, res: Response) => {
       prefix: prefix as string,
     });
     res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3.1 Hierarchical On-Demand Directory Explorer (Click-to-load folder navigation)
+app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const prefix = (req.query.prefix as string) || '';
+    const category = (req.query.category as string) || 'all';
+    const search = (req.query.search as string) || '';
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 200;
+    const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+    const sortBy = (req.query.sortBy as string) || 'key';
+    const sortOrder = (req.query.sortOrder as 'ASC' | 'DESC') || 'ASC';
+
+    const source = sourceRepo.getById(id);
+    if (!source) {
+      return res.status(404).json({ error: 'Source not found' });
+    }
+
+    const hierarchy = fileRepo.getHierarchy(id, {
+      prefix,
+      category,
+      search,
+      limit,
+      offset,
+      sortBy,
+      sortOrder,
+    });
+
+    res.json(hierarchy);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3.2 Download entire folder with preserved folder structure
+app.post('/api/sources/:id/download-folder', (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { folderPrefix = '', onlyMissing = true } = req.body;
+
+    const source = sourceRepo.getById(id);
+    if (!source) {
+      return res.status(404).json({ error: 'Source not found' });
+    }
+
+    const { batch, tasks } = downloadService.enqueueFolder(id, folderPrefix, Boolean(onlyMissing));
+    res.json({ batch, tasksCount: tasks.length });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

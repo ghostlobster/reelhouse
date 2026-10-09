@@ -221,6 +221,44 @@ export class DownloadService {
     return { batch, tasks };
   }
 
+  /**
+   * Enqueue download for an entire folder prefix, preserving folder structure
+   */
+  public enqueueFolder(
+    sourceId: string,
+    folderPrefix: string,
+    onlyMissing: boolean = true
+  ): { batch: DownloadBatch; tasks: DownloadTask[] } {
+    const source = sourceRepo.getById(sourceId);
+    if (!source) throw new Error('Source not found');
+
+    const result = fileRepo.getBySource(sourceId, { prefix: folderPrefix, limit: 10000 });
+    const targetFiles = onlyMissing
+      ? result.files.filter((f) => f.localStatus !== 'synced')
+      : result.files;
+
+    const batchId = `batch-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const totalSize = targetFiles.reduce((acc, f) => acc + f.size, 0);
+
+    const batch: DownloadBatch = {
+      id: batchId,
+      sourceId: source.id,
+      sourceName: source.name,
+      type: 'folder',
+      filesCount: targetFiles.length,
+      totalSize,
+      bytesDownloaded: 0,
+      status: targetFiles.length === 0 ? 'completed' : 'queued',
+      checkpointApplied: false,
+      createdAt: Date.now(),
+      completedAt: targetFiles.length === 0 ? Date.now() : undefined,
+    };
+
+    downloadRepo.createBatch(batch);
+    const tasks = targetFiles.map((f) => this.enqueue(sourceId, f.key, undefined, batchId));
+    return { batch, tasks };
+  }
+
   public cancel(taskId: string): boolean {
     const controller = this.abortControllers.get(taskId);
     if (controller) {

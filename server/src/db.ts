@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
-import { StorageSource, StorageFile, DownloadTask, ScanMetrics } from './types.js';
+import { StorageSource, StorageFile, DownloadTask, ScanMetrics, HierarchyFolder, HierarchyBreadcrumb, HierarchyResponse } from './types.js';
 
 const DB_DIR = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DB_DIR)) {
@@ -291,6 +291,153 @@ export const fileRepo = {
   getByKey(sourceId: string, key: string): StorageFile | null {
     const row = db.prepare('SELECT * FROM files WHERE source_id = ? AND key = ?').get(sourceId, key) as any;
     return row ? mapFileRow(row) : null;
+  },
+
+  getHierarchy(
+    sourceId: string,
+    options: {
+      prefix?: string;
+      category?: string;
+      search?: string;
+      limit?: number;
+      offset?: number;
+      sortBy?: string;
+      sortOrder?: 'ASC' | 'DESC';
+    } = {}
+  ): HierarchyResponse {
+    const rawPrefix = options.prefix || '';
+    // Normalize prefix: if empty or '/', normalize to ''; otherwise ensure it ends with '/'
+    const prefix = rawPrefix && rawPrefix !== '/' ? (rawPrefix.endsWith('/') ? rawPrefix : rawPrefix + '/') : '';
+    const { category, search, limit = 200, offset = 0, sortBy = 'key', sortOrder = 'ASC' } = options;
+
+    // Build breadcrumbs
+    const breadcrumbs: HierarchyBreadcrumb[] = [{ name: 'Root', prefix: '' }];
+    if (prefix) {
+      const parts = prefix.replace(/\/$/, '').split('/');
+      let currentAcc = '';
+      for (const part of parts) {
+        currentAcc += part + '/';
+        breadcrumbs.push({ name: part, prefix: currentAcc });
+      }
+    }
+
+    // Determine parent prefix
+    let parentPrefix: string | null = null;
+    if (prefix) {
+      const parts = prefix.replace(/\/$/, '').split('/');
+      parts.pop();
+      parentPrefix = parts.length > 0 ? parts.join('/') + '/' : '';
+    }
+
+    const len = prefix.length;
+
+    // Filter clauses for optional category and search
+    let catClause = '';
+    const catParams: any[] = [];
+    if (category && category !== 'all') {
+      catClause = ' AND category = ?';
+      catParams.push(category);
+    }
+
+    let searchClause = '';
+    const searchParams: any[] = [];
+    if (search) {
+      searchClause = ' AND key LIKE ?';
+      searchParams.push(`%${search}%`);
+    }
+
+    // 1. Folders query
+    let folderSql = '';
+    const folderParams: any[] = [sourceId];
+
+    if (!prefix) {
+      folderSql = `
+        SELECT
+          SUBSTR(key, 1, INSTR(key, '/') - 1) AS folder_name,
+          COUNT(*) as file_count,
+          SUM(size) as total_size,
+          SUM(duration) as video_duration
+        FROM files
+        WHERE source_id = ? AND INSTR(key, '/') > 0 ${catClause} ${searchClause}
+        GROUP BY folder_name
+        ORDER BY folder_name ASC
+      `;
+    } else {
+      folderSql = `
+        SELECT
+          SUBSTR(SUBSTR(key, ${len + 1}), 1, INSTR(SUBSTR(key, ${len + 1}), '/') - 1) AS folder_name,
+          COUNT(*) as file_count,
+          SUM(size) as total_size,
+          SUM(duration) as video_duration
+        FROM files
+        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') > 0 ${catClause} ${searchClause}
+        GROUP BY folder_name
+        ORDER BY folder_name ASC
+      `;
+      folderParams.push(`${prefix}%`);
+    }
+
+    folderParams.push(...catParams, ...searchParams);
+    const folderRows = db.prepare(folderSql).all(...folderParams) as any[];
+
+    const folders: HierarchyFolder[] = folderRows
+      .filter((r) => r.folder_name)
+      .map((r) => ({
+        name: r.folder_name,
+        prefix: `${prefix}${r.folder_name}/`,
+        fileCount: Number(r.file_count || 0),
+        totalSize: Number(r.total_size || 0),
+        videoDuration: Number(r.video_duration || 0),
+      }));
+
+    // 2. Immediate files query
+    let fileSql = '';
+    let countSql = '';
+    const fileParams: any[] = [sourceId];
+
+    const allowedSort = ['key', 'size', 'last_modified', 'duration', 'category', 'extension', 'local_status'];
+    const safeSort = allowedSort.includes(sortBy) ? sortBy : 'key';
+    const safeOrder = sortOrder === 'DESC' ? 'DESC' : 'ASC';
+
+    if (!prefix) {
+      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause}`;
+      fileSql = `
+        SELECT * FROM files
+        WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause}
+        ORDER BY ${safeSort} ${safeOrder}
+        LIMIT ? OFFSET ?
+      `;
+    } else {
+      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause}`;
+      fileSql = `
+        SELECT * FROM files
+        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause}
+        ORDER BY ${safeSort} ${safeOrder}
+        LIMIT ? OFFSET ?
+      `;
+      fileParams.push(`${prefix}%`);
+    }
+
+    const countParams = [...fileParams, ...catParams, ...searchParams];
+    const totalFilesRow = db.prepare(countSql).get(...countParams) as any;
+    const totalFiles = totalFilesRow ? totalFilesRow.count : 0;
+
+    const queryParams = [...fileParams, ...catParams, ...searchParams, limit, offset];
+    const fileRows = db.prepare(fileSql).all(...queryParams) as any[];
+    const files: StorageFile[] = fileRows.map(mapFileRow);
+
+    const totalSize = folders.reduce((acc, f) => acc + f.totalSize, 0) + files.reduce((acc, f) => acc + f.size, 0);
+
+    return {
+      currentPrefix: prefix,
+      parentPrefix,
+      breadcrumbs,
+      folders,
+      files,
+      totalFolders: folders.length,
+      totalFiles,
+      totalSize,
+    };
   },
 
   upsertBatch(files: StorageFile[]): void {
