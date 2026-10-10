@@ -41,6 +41,7 @@ interface HierarchyExplorerProps {
   onPreviewFile: (file: StorageFile) => void;
   onDownloadFile: (file: StorageFile) => void;
   onBatchDownload: (files: StorageFile[]) => void;
+  onDownloadFolder?: (folderPrefix: string) => Promise<void> | void;
   categoryFilter: string;
   setCategoryFilter: (cat: string) => void;
   searchQuery: string;
@@ -64,6 +65,7 @@ export const HierarchyExplorer: React.FC<HierarchyExplorerProps> = ({
   onPreviewFile,
   onDownloadFile,
   onBatchDownload,
+  onDownloadFolder,
   categoryFilter,
   setCategoryFilter,
   searchQuery,
@@ -169,21 +171,25 @@ export const HierarchyExplorer: React.FC<HierarchyExplorerProps> = ({
     if (!source) return;
     setFolderDownloading(folderPrefixToDownload);
     try {
-      const res = await fetch(`/api/sources/${source.id}/download-folder`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          folderPrefix: folderPrefixToDownload,
-          onlyMissing: true,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || 'Failed to download folder');
+      if (onDownloadFolder) {
+        await onDownloadFolder(folderPrefixToDownload);
       } else {
-        alert(
-          `Queued ${data.tasksCount} missing file(s) for folder "${folderPrefixToDownload}" to ${source.localPath}`
-        );
+        const res = await fetch(`/api/sources/${source.id}/download-folder`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folderPrefix: folderPrefixToDownload,
+            onlyMissing: true,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          alert(data.error || 'Failed to download folder');
+        } else {
+          alert(
+            `Queued ${data.tasksCount} missing file(s) for folder "${folderPrefixToDownload}" to ${source.localPath || 'local destination'}`
+          );
+        }
       }
     } catch (err: any) {
       alert(err.message || 'Download error');

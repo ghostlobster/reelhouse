@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'node:path';
 import fs from 'node:fs';
-import { StorageSource, StorageFile, DownloadTask, ScanMetrics, HierarchyFolder, HierarchyBreadcrumb, HierarchyResponse } from './types.js';
+import { StorageSource, StorageFile, DownloadTask, DownloadBatch, ScanMetrics, HierarchyFolder, HierarchyBreadcrumb, HierarchyResponse } from './types.js';
 
 const DB_DIR = path.resolve(process.cwd(), 'data');
 if (!fs.existsSync(DB_DIR)) {

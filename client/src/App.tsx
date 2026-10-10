@@ -9,6 +9,7 @@ import { OnPremSyncManager } from './components/OnPremSyncManager';
 import { SourceSettings } from './components/SourceSettings';
 import { DateRangeDownloadModal } from './components/DateRangeDownloadModal';
 import { DownloadHistoryView } from './components/DownloadHistoryView';
+import { DownloadLocationModal } from './components/DownloadLocationModal';
 import { StorageSource, StorageFile, ScanMetrics, DownloadTask } from './types';
 import { Sparkles, PlusCircle } from 'lucide-react';
 
@@ -49,6 +50,16 @@ export const App: React.FC = () => {
   const [isAddSourceModalOpen, setIsAddSourceModalOpen] = useState(false);
   const [isDownloadsDrawerOpen, setIsDownloadsDrawerOpen] = useState(false);
   const [isDateRangeModalOpen, setIsDateRangeModalOpen] = useState(false);
+
+  // Local Download Location Confirmation Modal
+  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
+  const [pendingDownload, setPendingDownload] = useState<{
+    actionTitle: string;
+    itemDetails?: string;
+    fileCount?: number;
+    totalSize?: number;
+    execute: (destinationDir: string) => Promise<void>;
+  } | null>(null);
 
   // Load Sources
   const fetchSources = async () => {
@@ -230,53 +241,147 @@ export const App: React.FC = () => {
     }
   };
 
+  const ensureDownloadLocation = (action: {
+    actionTitle: string;
+    itemDetails?: string;
+    fileCount?: number;
+    totalSize?: number;
+    execute: (destinationDir: string) => Promise<void>;
+  }) => {
+    if (!activeSource) return;
+    if (activeSource.localPath && activeSource.localPath.trim()) {
+      action.execute(activeSource.localPath.trim()).catch((err) => {
+        alert('Download error: ' + (err.message || err));
+      });
+      return;
+    }
+
+    setPendingDownload(action);
+    setIsLocationModalOpen(true);
+  };
+
+  const handleConfirmLocation = async (destinationDir: string, saveAsDefault: boolean) => {
+    if (!activeSource) return;
+    const trimmed = destinationDir.trim();
+    if (!trimmed) return;
+
+    if (saveAsDefault) {
+      await handleUpdateSource({ localPath: trimmed });
+    }
+
+    if (pendingDownload) {
+      const act = pendingDownload;
+      setPendingDownload(null);
+      await act.execute(trimmed);
+    }
+  };
+
   const handleDownloadFile = async (file: StorageFile) => {
     if (!activeSource) return;
-    try {
-      await fetch('/api/downloads', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId: activeSource.id, key: file.key }),
-      });
-      setIsDownloadsDrawerOpen(true);
-      fetchDownloads();
-    } catch (err) {
-      alert('Download error: ' + err);
-    }
+    ensureDownloadLocation({
+      actionTitle: 'Download Single File',
+      itemDetails: file.key,
+      fileCount: 1,
+      totalSize: file.size,
+      execute: async (destinationDir) => {
+        const res = await fetch('/api/downloads', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceId: activeSource.id,
+            key: file.key,
+            destinationDir,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to enqueue file download');
+        }
+        setIsDownloadsDrawerOpen(true);
+        fetchDownloads();
+      },
+    });
   };
 
   const handleBatchDownload = async (batchFiles: StorageFile[]) => {
     if (!activeSource || batchFiles.length === 0) return;
-    try {
-      await fetch('/api/downloads', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sourceId: activeSource.id,
-          keys: batchFiles.map((f) => f.key),
-        }),
-      });
-      setIsDownloadsDrawerOpen(true);
-      fetchDownloads();
-    } catch (err) {
-      alert('Batch download error: ' + err);
-    }
+    const totalSize = batchFiles.reduce((acc, f) => acc + f.size, 0);
+    ensureDownloadLocation({
+      actionTitle: `Batch Download (${batchFiles.length} files)`,
+      itemDetails: `${batchFiles.length} file(s) selected`,
+      fileCount: batchFiles.length,
+      totalSize,
+      execute: async (destinationDir) => {
+        const res = await fetch('/api/downloads', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceId: activeSource.id,
+            keys: batchFiles.map((f) => f.key),
+            destinationDir,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to enqueue batch download');
+        }
+        setIsDownloadsDrawerOpen(true);
+        fetchDownloads();
+      },
+    });
   };
 
   const handleDownloadMissing = async () => {
     if (!activeSource) return;
-    try {
-      const res = await fetch('/api/downloads/missing', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId: activeSource.id }),
-      });
-      const data = await res.json();
-      setIsDownloadsDrawerOpen(true);
-      fetchDownloads();
-    } catch (err) {
-      alert('Download missing error: ' + err);
-    }
+    const missingCount = metrics?.onPremSync?.missingLocalCount;
+    const missingSize = metrics?.onPremSync?.missingLocalSize;
+    ensureDownloadLocation({
+      actionTitle: 'Sync Missing Files to Local Box',
+      itemDetails: missingCount !== undefined ? `Syncing ${missingCount} missing file(s)` : 'Syncing missing files',
+      fileCount: missingCount,
+      totalSize: missingSize,
+      execute: async (destinationDir) => {
+        const res = await fetch('/api/downloads/missing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceId: activeSource.id,
+            destinationDir,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to sync missing files');
+        }
+        setIsDownloadsDrawerOpen(true);
+        fetchDownloads();
+      },
+    });
+  };
+
+  const handleDownloadFolder = async (folderPrefix: string) => {
+    if (!activeSource) return;
+    ensureDownloadLocation({
+      actionTitle: `Download Folder: "${folderPrefix || 'Root'}"`,
+      itemDetails: `Folder prefix: ${folderPrefix}`,
+      execute: async (destinationDir) => {
+        const res = await fetch(`/api/sources/${activeSource.id}/download-folder`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folderPrefix,
+            onlyMissing: true,
+            destinationDir,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to download folder');
+        }
+        setIsDownloadsDrawerOpen(true);
+        fetchDownloads();
+      },
+    });
   };
 
   const handleCancelTask = async (taskId: string) => {
@@ -344,18 +449,27 @@ export const App: React.FC = () => {
     updateCheckpoint: boolean;
   }) => {
     if (!activeSource) return;
-    const res = await fetch(`/api/sources/${activeSource.id}/download-range`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
+    ensureDownloadLocation({
+      actionTitle: 'Date Range Download',
+      itemDetails: 'Selected date range download batch',
+      execute: async (destinationDir) => {
+        const res = await fetch(`/api/sources/${activeSource.id}/download-range`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ...params,
+            destinationDir,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.error || 'Failed to start range download');
+        }
+        await fetchSources();
+        setIsDownloadsDrawerOpen(true);
+        fetchDownloads();
+      },
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to start range download');
-    }
-    await fetchSources();
-    setIsDownloadsDrawerOpen(true);
-    fetchDownloads();
   };
 
   const handleUpdateCheckpoint = async (timestamp: number | null) => {
@@ -474,6 +588,7 @@ export const App: React.FC = () => {
                 onPreviewFile={setPreviewFile}
                 onDownloadFile={handleDownloadFile}
                 onBatchDownload={handleBatchDownload}
+                onDownloadFolder={handleDownloadFolder}
               />
             )}
 
@@ -526,6 +641,23 @@ export const App: React.FC = () => {
           source={activeSource}
           onClose={() => setIsDateRangeModalOpen(false)}
           onStartDownload={handleStartRangeDownload}
+        />
+      )}
+
+      {/* Local Download Location Confirmation Modal */}
+      {isLocationModalOpen && activeSource && (
+        <DownloadLocationModal
+          isOpen={isLocationModalOpen}
+          source={activeSource}
+          actionTitle={pendingDownload?.actionTitle}
+          itemDetails={pendingDownload?.itemDetails}
+          fileCount={pendingDownload?.fileCount}
+          totalSize={pendingDownload?.totalSize}
+          onConfirm={handleConfirmLocation}
+          onClose={() => {
+            setIsLocationModalOpen(false);
+            setPendingDownload(null);
+          }}
         />
       )}
 

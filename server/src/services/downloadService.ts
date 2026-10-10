@@ -191,7 +191,7 @@ export class DownloadService {
   /**
    * Enqueue all missing files as a sync batch
    */
-  public enqueueAllMissing(sourceId: string): { batch: DownloadBatch; tasks: DownloadTask[] } {
+  public enqueueAllMissing(sourceId: string, customDestDir?: string): { batch: DownloadBatch; tasks: DownloadTask[] } {
     const source = sourceRepo.getById(sourceId);
     if (!source) throw new Error('Source not found');
 
@@ -217,7 +217,7 @@ export class DownloadService {
 
     downloadRepo.createBatch(batch);
 
-    const tasks = missing.map((f) => this.enqueue(sourceId, f.key, undefined, batchId));
+    const tasks = missing.map((f) => this.enqueue(sourceId, f.key, customDestDir, batchId));
     return { batch, tasks };
   }
 
@@ -227,7 +227,8 @@ export class DownloadService {
   public enqueueFolder(
     sourceId: string,
     folderPrefix: string,
-    onlyMissing: boolean = true
+    onlyMissing: boolean = true,
+    customDestDir?: string
   ): { batch: DownloadBatch; tasks: DownloadTask[] } {
     const source = sourceRepo.getById(sourceId);
     if (!source) throw new Error('Source not found');
@@ -255,7 +256,7 @@ export class DownloadService {
     };
 
     downloadRepo.createBatch(batch);
-    const tasks = targetFiles.map((f) => this.enqueue(sourceId, f.key, undefined, batchId));
+    const tasks = targetFiles.map((f) => this.enqueue(sourceId, f.key, customDestDir, batchId));
     return { batch, tasks };
   }
 

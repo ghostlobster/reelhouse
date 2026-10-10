@@ -44,6 +44,8 @@ downloadService.onProgress((event) => {
   broadcastWs('download:progress', event);
 });
 
+const paramId = (req: Request): string => (Array.isArray(req.params.id) ? req.params.id[0] : req.params.id) || '';
+
 // ---------------- API ROUTES ----------------
 
 // 1. Sources CRUD
@@ -58,7 +60,7 @@ app.get('/api/sources', (_req: Request, res: Response) => {
 
 app.get('/api/sources/:id', (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(req.params.id);
+    const source = sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
     res.json(source);
   } catch (err: any) {
@@ -73,8 +75,8 @@ app.post('/api/sources', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Name, provider, and bucket are required' });
     }
 
-    const defaultLocalPath = data.localPath || path.resolve(process.cwd(), 'downloads', data.name.replace(/[^a-zA-Z0-9_-]/g, '_'));
-    if (!fs.existsSync(defaultLocalPath)) {
+    const defaultLocalPath = data.localPath ? data.localPath.trim() : '';
+    if (defaultLocalPath && !fs.existsSync(defaultLocalPath)) {
       try { fs.mkdirSync(defaultLocalPath, { recursive: true }); } catch {}
     }
 
@@ -108,7 +110,7 @@ app.post('/api/sources', (req: Request, res: Response) => {
 
 app.put('/api/sources/:id', (req: Request, res: Response) => {
   try {
-    const existing = sourceRepo.getById(req.params.id);
+    const existing = sourceRepo.getById(paramId(req));
     if (!existing) return res.status(404).json({ error: 'Source not found' });
 
     const data = req.body;
@@ -141,7 +143,7 @@ app.put('/api/sources/:id', (req: Request, res: Response) => {
 
 app.delete('/api/sources/:id', (req: Request, res: Response) => {
   try {
-    sourceRepo.delete(req.params.id);
+    sourceRepo.delete(paramId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -181,7 +183,7 @@ app.post('/api/sources/test', async (req: Request, res: Response) => {
 // 2. Scanner Trigger & Metrics
 app.post('/api/sources/:id/scan', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(req.params.id);
+    const source = sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
 
     if (scannerService.isScanning(source.id)) {
@@ -203,7 +205,7 @@ app.post('/api/sources/:id/scan', async (req: Request, res: Response) => {
 
 app.get('/api/sources/:id/metrics', (req: Request, res: Response) => {
   try {
-    const metrics = metricsService.computeMetrics(req.params.id);
+    const metrics = metricsService.computeMetrics(paramId(req));
     if (!metrics) return res.status(404).json({ error: 'Source not found' });
     res.json(metrics);
   } catch (err: any) {
@@ -218,7 +220,7 @@ app.get('/api/sources/:id/files', (req: Request, res: Response) => {
     const startDate = req.query.startDate ? parseInt(req.query.startDate as string, 10) : undefined;
     const endDate = req.query.endDate ? parseInt(req.query.endDate as string, 10) : undefined;
 
-    const result = fileRepo.getBySource(req.params.id, {
+    const result = fileRepo.getBySource(paramId(req), {
       category: category as string,
       search: search as string,
       startDate,
@@ -238,7 +240,7 @@ app.get('/api/sources/:id/files', (req: Request, res: Response) => {
 // 3.1 Hierarchical On-Demand Directory Explorer (Click-to-load folder navigation)
 app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = paramId(req);
     const prefix = (req.query.prefix as string) || '';
     const category = (req.query.category as string) || 'all';
     const search = (req.query.search as string) || '';
@@ -275,15 +277,15 @@ app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
 // 3.2 Download entire folder with preserved folder structure
 app.post('/api/sources/:id/download-folder', (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
-    const { folderPrefix = '', onlyMissing = true } = req.body;
+    const id = paramId(req);
+    const { folderPrefix = '', onlyMissing = true, destinationDir } = req.body;
 
     const source = sourceRepo.getById(id);
     if (!source) {
       return res.status(404).json({ error: 'Source not found' });
     }
 
-    const { batch, tasks } = downloadService.enqueueFolder(id, folderPrefix, Boolean(onlyMissing));
+    const { batch, tasks } = downloadService.enqueueFolder(id, folderPrefix, Boolean(onlyMissing), destinationDir);
     res.json({ batch, tasksCount: tasks.length });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -293,7 +295,7 @@ app.post('/api/sources/:id/download-folder', (req: Request, res: Response) => {
 // 4. File Streaming & Range Proxy (Supports seamless Video/Audio seeking & Image preview)
 app.get('/api/sources/:id/stream', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(req.params.id);
+    const source = sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).send('Source not found');
 
     const key = req.query.key as string;
@@ -341,7 +343,7 @@ app.get('/api/sources/:id/stream', async (req: Request, res: Response) => {
 // 5. Raw Text / Code Content for preview
 app.get('/api/sources/:id/raw', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(req.params.id);
+    const source = sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).send('Source not found');
 
     const key = req.query.key as string;
@@ -367,7 +369,7 @@ app.get('/api/sources/:id/raw', async (req: Request, res: Response) => {
 // 6. Direct / Presigned URL
 app.get('/api/sources/:id/preview-url', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(req.params.id);
+    const source = sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
 
     const key = req.query.key as string;
@@ -416,11 +418,23 @@ app.post('/api/downloads', (req: Request, res: Response) => {
 
 app.post('/api/downloads/missing', (req: Request, res: Response) => {
   try {
-    const { sourceId } = req.body;
+    const { sourceId, destinationDir } = req.body;
     if (!sourceId) return res.status(400).json({ error: 'sourceId required' });
 
-    const result = downloadService.enqueueAllMissing(sourceId);
+    const result = downloadService.enqueueAllMissing(sourceId, destinationDir);
     res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// System Helper: Suggest clean default on-premise download path per source
+app.get('/api/system/default-download-path', (req: Request, res: Response) => {
+  try {
+    const sourceName = (req.query.sourceName as string) || 'source';
+    const sanitized = sourceName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const suggestedPath = path.resolve(process.cwd(), 'downloads', sanitized);
+    res.json({ suggestedPath });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -429,7 +443,7 @@ app.post('/api/downloads/missing', (req: Request, res: Response) => {
 // Checkpoint & Date Range Downloads
 app.get('/api/sources/:id/checkpoint', (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(req.params.id);
+    const source = sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
     res.json({
       lastCheckpointMtime: source.lastCheckpointMtime || null,
@@ -443,7 +457,7 @@ app.get('/api/sources/:id/checkpoint', (req: Request, res: Response) => {
 app.post('/api/sources/:id/checkpoint', (req: Request, res: Response) => {
   try {
     const { timestamp } = req.body;
-    sourceRepo.updateCheckpoint(req.params.id, timestamp ? Number(timestamp) : 0);
+    sourceRepo.updateCheckpoint(paramId(req), timestamp ? Number(timestamp) : 0);
     res.json({ success: true, timestamp });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -453,7 +467,7 @@ app.post('/api/sources/:id/checkpoint', (req: Request, res: Response) => {
 app.get('/api/sources/:id/date-range-preview', (req: Request, res: Response) => {
   try {
     const { startDate, endDate, onlyMissing } = req.query;
-    const files = fileRepo.getByDateRange(req.params.id, {
+    const files = fileRepo.getByDateRange(paramId(req), {
       startDate: startDate ? parseInt(startDate as string, 10) : undefined,
       endDate: endDate ? parseInt(endDate as string, 10) : undefined,
       onlyMissing: onlyMissing === 'true' || onlyMissing === '1',
@@ -473,7 +487,7 @@ app.post('/api/sources/:id/download-range', (req: Request, res: Response) => {
   try {
     const { startDate, endDate, onlyMissing, updateCheckpoint, destinationDir } = req.body;
     const result = downloadService.enqueueDateRange({
-      sourceId: req.params.id,
+      sourceId: paramId(req),
       startDate: startDate ? Number(startDate) : undefined,
       endDate: endDate ? Number(endDate) : undefined,
       onlyMissing: Boolean(onlyMissing),
@@ -502,9 +516,9 @@ app.get('/api/history/batches', (req: Request, res: Response) => {
 
 app.get('/api/history/batches/:id', (req: Request, res: Response) => {
   try {
-    const batch = downloadRepo.getBatchById(req.params.id);
+    const batch = downloadRepo.getBatchById(paramId(req));
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    const tasks = downloadRepo.getBatchTasks(req.params.id);
+    const tasks = downloadRepo.getBatchTasks(paramId(req));
     res.json({ batch, tasks });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -529,7 +543,7 @@ app.get('/api/history/tasks', (req: Request, res: Response) => {
 
 app.post('/api/downloads/:id/cancel', (req: Request, res: Response) => {
   try {
-    const success = downloadService.cancel(req.params.id);
+    const success = downloadService.cancel(paramId(req));
     res.json({ success });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

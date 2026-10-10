@@ -54,6 +54,7 @@ interface FileBrowserProps {
   onPreviewFile: (file: StorageFile) => void;
   onDownloadFile: (file: StorageFile) => void;
   onBatchDownload: (files: StorageFile[]) => void;
+  onDownloadFolder?: (folderPrefix: string) => Promise<void> | void;
 }
 
 const CATEGORY_ICONS: Record<FileCategory, React.ReactNode> = {
@@ -88,6 +89,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
   onPreviewFile,
   onDownloadFile,
   onBatchDownload,
+  onDownloadFolder,
 }) => {
   const [viewMode, setViewMode] = useState<'hierarchy' | 'flat'>('hierarchy');
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -428,6 +430,7 @@ export const FileBrowser: React.FC<FileBrowserProps> = ({
           onPreviewFile={onPreviewFile}
           onDownloadFile={onDownloadFile}
           onBatchDownload={onBatchDownload}
+          onDownloadFolder={onDownloadFolder}
           categoryFilter={categoryFilter}
           setCategoryFilter={setCategoryFilter}
           searchQuery={searchQuery}

@@ -144,13 +144,13 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
       const startMs = startDate ? startDate.getTime() : undefined;
       const endMs = endDate ? endDate.getTime() : undefined;
 
+      onClose();
       await onStartDownload({
         startDate: startMs,
         endDate: endMs,
         onlyMissing,
         updateCheckpoint,
       });
-      onClose();
     } catch (err: any) {
       alert(err.message || 'Download failed');
     } finally {
@@ -382,7 +382,7 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
               <span>Exact Folder Structure Preservation Guaranteed</span>
             </div>
             <p className="text-[11px] text-slate-400 leading-relaxed font-mono">
-              Target: <span className="text-slate-300">{source.localPath}</span>/&lt;path&gt;/&lt;filename&gt;
+              Target: <span className={source.localPath?.trim() ? 'text-slate-300' : 'text-amber-400 font-sans'}>{source.localPath?.trim() || '(Location confirmation will popup on submit)'}</span>/&lt;path&gt;/&lt;filename&gt;
             </p>
           </div>
 

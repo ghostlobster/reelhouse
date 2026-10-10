@@ -10,6 +10,7 @@ import {
   Globe,
   Database,
   HelpCircle,
+  RotateCcw,
 } from 'lucide-react';
 import { StorageSource, StorageProvider } from '../types';
 
@@ -338,19 +339,38 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
               </span>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
-                On-Premise Target Directory
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                  <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
+                  On-Premise Target Directory
+                </label>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const srcName = name.trim() || 'source';
+                    try {
+                      const res = await fetch(`/api/system/default-download-path?sourceName=${encodeURIComponent(srcName)}`);
+                      const data = await res.json();
+                      if (data.suggestedPath) setLocalPath(data.suggestedPath);
+                    } catch {
+                      setLocalPath(`./downloads/${srcName.replace(/[^a-zA-Z0-9_-]/g, '_')}`);
+                    }
+                  }}
+                  className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 transition-colors"
+                >
+                  <RotateCcw className="w-2.5 h-2.5" />
+                  <span>Auto-fill Default</span>
+                </button>
+              </div>
               <input
                 type="text"
-                placeholder="E:\Storage\cdn-mirror or ./downloads"
+                placeholder="Leave blank to prompt when downloading"
                 value={localPath}
                 onChange={(e) => setLocalPath(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
               />
               <span className="text-[10px] text-slate-500 mt-0.5 block">
-                Local directory on this host where downloaded files are mirrored.
+                Optional default folder. If left blank, you will be prompted to confirm a location upon download.
               </span>
             </div>
           </div>
