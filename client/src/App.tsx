@@ -13,6 +13,19 @@ import { DownloadLocationModal } from './components/DownloadLocationModal';
 import { StorageSource, StorageFile, ScanMetrics, DownloadTask } from './types';
 import { Sparkles, PlusCircle } from 'lucide-react';
 
+interface DownloadAction {
+  actionTitle: string;
+  itemDetails?: string;
+  fileCount?: number;
+  totalSize?: number;
+  execute: (destinationDir: string) => Promise<void>;
+}
+
+interface PendingDownload extends DownloadAction {
+  /** Resolves the promise returned by ensureDownloadLocation; only the first call counts */
+  settle: (started: boolean) => void;
+}
+
 export const App: React.FC = () => {
   const [sources, setSources] = useState<StorageSource[]>([]);
   const [activeSource, setActiveSource] = useState<StorageSource | null>(null);
@@ -51,15 +64,8 @@ export const App: React.FC = () => {
   const [isDownloadsDrawerOpen, setIsDownloadsDrawerOpen] = useState(false);
   const [isDateRangeModalOpen, setIsDateRangeModalOpen] = useState(false);
 
-  // Local Download Location Confirmation Modal
-  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
-  const [pendingDownload, setPendingDownload] = useState<{
-    actionTitle: string;
-    itemDetails?: string;
-    fileCount?: number;
-    totalSize?: number;
-    execute: (destinationDir: string) => Promise<void>;
-  } | null>(null);
+  // Local Download Location Confirmation Modal (open while a download awaits a location)
+  const [pendingDownload, setPendingDownload] = useState<PendingDownload | null>(null);
 
   // Load Sources
   const fetchSources = async () => {
@@ -241,42 +247,64 @@ export const App: React.FC = () => {
     }
   };
 
-  const ensureDownloadLocation = (action: {
-    actionTitle: string;
-    itemDetails?: string;
-    fileCount?: number;
-    totalSize?: number;
-    execute: (destinationDir: string) => Promise<void>;
-  }) => {
-    if (!activeSource) return;
-    if (activeSource.localPath && activeSource.localPath.trim()) {
-      action.execute(activeSource.localPath.trim()).catch((err) => {
-        alert('Download error: ' + (err.message || err));
-      });
-      return;
+  /**
+   * Run a download action in the source's default folder, or ask for a folder first.
+   * Resolves true once the download is enqueued, or false if the location prompt is dismissed;
+   * rejects only when enqueueing into the default folder fails.
+   */
+  const ensureDownloadLocation = async (action: DownloadAction): Promise<boolean> => {
+    if (!activeSource) return false;
+    const localPath = activeSource.localPath?.trim();
+    if (localPath) {
+      await action.execute(localPath);
+      return true;
     }
 
-    setPendingDownload(action);
-    setIsLocationModalOpen(true);
+    return new Promise((resolve) => setPendingDownload({ ...action, settle: resolve }));
   };
 
+  // Errors propagate to the location modal, which keeps the pending action so the user can retry
   const handleConfirmLocation = async (destinationDir: string, saveAsDefault: boolean) => {
-    if (!activeSource) return;
-    const trimmed = destinationDir.trim();
-    if (!trimmed) return;
-
+    if (!pendingDownload) return;
     if (saveAsDefault) {
-      await handleUpdateSource({ localPath: trimmed });
+      await handleUpdateSource({ localPath: destinationDir });
     }
-
-    if (pendingDownload) {
-      const act = pendingDownload;
-      setPendingDownload(null);
-      await act.execute(trimmed);
-    }
+    await pendingDownload.execute(destinationDir);
+    pendingDownload.settle(true);
   };
 
-  const handleDownloadFile = async (file: StorageFile) => {
+  const handleCloseLocationModal = () => {
+    pendingDownload?.settle(false);
+    setPendingDownload(null);
+  };
+
+  const reportDownloadError = (err: any) => alert('Download error: ' + (err?.message || err));
+
+  /**
+   * POST a download request, then surface the queue (or explain why nothing was queued).
+   */
+  const postDownload = async (url: string, body: object, failureMessage: string) => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || failureMessage);
+    }
+
+    const queued: number = data.task ? 1 : data.tasks?.length ?? data.tasksCount ?? 0;
+    if (queued === 0) {
+      alert('Nothing to download: all matching files are already synced locally.');
+    } else {
+      setIsDownloadsDrawerOpen(true);
+    }
+    fetchDownloads();
+    return data;
+  };
+
+  const handleDownloadFile = (file: StorageFile) => {
     if (!activeSource) return;
     ensureDownloadLocation({
       actionTitle: 'Download Single File',
@@ -284,26 +312,16 @@ export const App: React.FC = () => {
       fileCount: 1,
       totalSize: file.size,
       execute: async (destinationDir) => {
-        const res = await fetch('/api/downloads', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sourceId: activeSource.id,
-            key: file.key,
-            destinationDir,
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Failed to enqueue file download');
-        }
-        setIsDownloadsDrawerOpen(true);
-        fetchDownloads();
+        await postDownload(
+          '/api/downloads',
+          { sourceId: activeSource.id, key: file.key, destinationDir },
+          'Failed to enqueue file download'
+        );
       },
-    });
+    }).catch(reportDownloadError);
   };
 
-  const handleBatchDownload = async (batchFiles: StorageFile[]) => {
+  const handleBatchDownload = (batchFiles: StorageFile[]) => {
     if (!activeSource || batchFiles.length === 0) return;
     const totalSize = batchFiles.reduce((acc, f) => acc + f.size, 0);
     ensureDownloadLocation({
@@ -312,26 +330,16 @@ export const App: React.FC = () => {
       fileCount: batchFiles.length,
       totalSize,
       execute: async (destinationDir) => {
-        const res = await fetch('/api/downloads', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sourceId: activeSource.id,
-            keys: batchFiles.map((f) => f.key),
-            destinationDir,
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Failed to enqueue batch download');
-        }
-        setIsDownloadsDrawerOpen(true);
-        fetchDownloads();
+        await postDownload(
+          '/api/downloads',
+          { sourceId: activeSource.id, keys: batchFiles.map((f) => f.key), destinationDir },
+          'Failed to enqueue batch download'
+        );
       },
-    });
+    }).catch(reportDownloadError);
   };
 
-  const handleDownloadMissing = async () => {
+  const handleDownloadMissing = () => {
     if (!activeSource) return;
     const missingCount = metrics?.onPremSync?.missingLocalCount;
     const missingSize = metrics?.onPremSync?.missingLocalSize;
@@ -341,45 +349,27 @@ export const App: React.FC = () => {
       fileCount: missingCount,
       totalSize: missingSize,
       execute: async (destinationDir) => {
-        const res = await fetch('/api/downloads/missing', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sourceId: activeSource.id,
-            destinationDir,
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Failed to sync missing files');
-        }
-        setIsDownloadsDrawerOpen(true);
-        fetchDownloads();
+        await postDownload(
+          '/api/downloads/missing',
+          { sourceId: activeSource.id, destinationDir },
+          'Failed to sync missing files'
+        );
       },
-    });
+    }).catch(reportDownloadError);
   };
 
+  // Awaited by HierarchyExplorer, which shows its own spinner and error alert
   const handleDownloadFolder = async (folderPrefix: string) => {
     if (!activeSource) return;
-    ensureDownloadLocation({
+    await ensureDownloadLocation({
       actionTitle: `Download Folder: "${folderPrefix || 'Root'}"`,
       itemDetails: `Folder prefix: ${folderPrefix}`,
       execute: async (destinationDir) => {
-        const res = await fetch(`/api/sources/${activeSource.id}/download-folder`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            folderPrefix,
-            onlyMissing: true,
-            destinationDir,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || 'Failed to download folder');
-        }
-        setIsDownloadsDrawerOpen(true);
-        fetchDownloads();
+        await postDownload(
+          `/api/sources/${activeSource.id}/download-folder`,
+          { folderPrefix, onlyMissing: true, destinationDir },
+          'Failed to download folder'
+        );
       },
     });
   };
@@ -447,27 +437,19 @@ export const App: React.FC = () => {
     endDate?: number;
     onlyMissing: boolean;
     updateCheckpoint: boolean;
-  }) => {
-    if (!activeSource) return;
-    ensureDownloadLocation({
+  }): Promise<boolean> => {
+    if (!activeSource) return false;
+    // Awaited by DateRangeDownloadModal, which reports errors and closes itself once started
+    return ensureDownloadLocation({
       actionTitle: 'Date Range Download',
       itemDetails: 'Selected date range download batch',
       execute: async (destinationDir) => {
-        const res = await fetch(`/api/sources/${activeSource.id}/download-range`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ...params,
-            destinationDir,
-          }),
-        });
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Failed to start range download');
-        }
+        await postDownload(
+          `/api/sources/${activeSource.id}/download-range`,
+          { ...params, destinationDir },
+          'Failed to start range download'
+        );
         await fetchSources();
-        setIsDownloadsDrawerOpen(true);
-        fetchDownloads();
       },
     });
   };
@@ -645,19 +627,16 @@ export const App: React.FC = () => {
       )}
 
       {/* Local Download Location Confirmation Modal */}
-      {isLocationModalOpen && activeSource && (
+      {pendingDownload && activeSource && (
         <DownloadLocationModal
-          isOpen={isLocationModalOpen}
+          isOpen
           source={activeSource}
-          actionTitle={pendingDownload?.actionTitle}
-          itemDetails={pendingDownload?.itemDetails}
-          fileCount={pendingDownload?.fileCount}
-          totalSize={pendingDownload?.totalSize}
+          actionTitle={pendingDownload.actionTitle}
+          itemDetails={pendingDownload.itemDetails}
+          fileCount={pendingDownload.fileCount}
+          totalSize={pendingDownload.totalSize}
           onConfirm={handleConfirmLocation}
-          onClose={() => {
-            setIsLocationModalOpen(false);
-            setPendingDownload(null);
-          }}
+          onClose={handleCloseLocationModal}
         />
       )}
 

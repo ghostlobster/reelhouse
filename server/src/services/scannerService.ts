@@ -102,15 +102,25 @@ export class ScannerService {
           let localStatus: StorageFile['localStatus'] = 'missing';
           let localSize: number | undefined = undefined;
           let localMtime: number | undefined = undefined;
+          let localFilePath: string | undefined = undefined;
 
-          if (source.localPath) {
+          const existingFile = fileRepo.getByKey(source.id, key);
+
+          // Prefer the source's default directory, then wherever the file was last downloaded to
+          const candidatePaths = [
+            source.localPath ? path.join(source.localPath, key) : undefined,
+            existingFile?.localFilePath,
+          ].filter((p): p is string => Boolean(p));
+
+          for (const candidate of candidatePaths) {
             try {
-              const fullLocalPath = path.join(source.localPath, key);
-              if (fs.existsSync(fullLocalPath)) {
-                const stat = fs.statSync(fullLocalPath);
+              if (fs.existsSync(candidate)) {
+                const stat = fs.statSync(candidate);
                 localSize = stat.size;
                 localMtime = Math.floor(stat.mtimeMs);
                 localStatus = stat.size === size ? 'synced' : 'mismatch';
+                localFilePath = candidate;
+                break;
               }
             } catch {}
           }
@@ -123,7 +133,6 @@ export class ScannerService {
           let bitrate: number | undefined = undefined;
 
           // Check if we already inspected this file before and size hasn't changed
-          const existingFile = fileRepo.getByKey(source.id, key);
           if (existingFile && existingFile.duration && existingFile.duration > 0 && existingFile.size === size) {
             duration = existingFile.duration;
             width = existingFile.width;
@@ -133,10 +142,9 @@ export class ScannerService {
           } else if (deepScan && (category === 'video' || category === 'audio')) {
             // Extract media info
             try {
-              if (localStatus === 'synced' && source.localPath) {
+              if (localStatus === 'synced' && localFilePath) {
                 // If local file is synced, parse directly from local disk (fastest!)
-                const fullLocalPath = path.join(source.localPath, key);
-                const info = await inspectLocalMediaFile(fullLocalPath);
+                const info = await inspectLocalMediaFile(localFilePath);
                 duration = info.duration;
                 width = info.width;
                 height = info.height;
@@ -201,6 +209,8 @@ export class ScannerService {
             localStatus,
             localSize,
             localMtime,
+            // Keep the recorded location when it's temporarily unreachable (e.g. an unplugged drive)
+            localFilePath: localFilePath ?? existingFile?.localFilePath,
             scannedAt: Date.now(),
           };
 

@@ -8,7 +8,16 @@ if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true });
 }
 
-const dbPath = path.join(DB_DIR, 'cdn_buddy.db');
+const dbPath = path.join(DB_DIR, 'reelhouse.db');
+
+// Carry over the database from before the rename (CDN Buddy → Reelhouse), along with its WAL files
+const legacyDbPath = path.join(DB_DIR, 'cdn_buddy.db');
+if (!fs.existsSync(dbPath) && fs.existsSync(legacyDbPath)) {
+  for (const suffix of ['', '-wal', '-shm']) {
+    if (fs.existsSync(legacyDbPath + suffix)) fs.renameSync(legacyDbPath + suffix, dbPath + suffix);
+  }
+}
+
 export const db = new Database(dbPath);
 
 // Enable WAL mode for high concurrency
@@ -57,6 +66,7 @@ db.exec(`
     local_status TEXT DEFAULT 'missing',
     local_size INTEGER,
     local_mtime INTEGER,
+    local_file_path TEXT,
     scanned_at INTEGER NOT NULL,
     FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE
   );
@@ -124,6 +134,19 @@ db.exec(`
 try { db.exec('ALTER TABLE sources ADD COLUMN last_checkpoint_mtime INTEGER;'); } catch {}
 try { db.exec('ALTER TABLE download_tasks ADD COLUMN batch_id TEXT;'); } catch {}
 try { db.exec('ALTER TABLE download_tasks ADD COLUMN completed_at INTEGER;'); } catch {}
+try { db.exec('ALTER TABLE files ADD COLUMN local_file_path TEXT;'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_downloads_source_key ON download_tasks(source_id, file_key);'); } catch {}
+// Backfill locations of files downloaded before local_file_path was recorded
+try {
+  db.exec(`
+    UPDATE files SET local_file_path = (
+      SELECT t.destination_path FROM download_tasks t
+      WHERE t.source_id = files.source_id AND t.file_key = files.key AND t.status = 'completed'
+      ORDER BY t.completed_at DESC LIMIT 1
+    )
+    WHERE local_file_path IS NULL
+  `);
+} catch {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_downloads_batch ON download_tasks(batch_id);'); } catch {}
 
 
@@ -473,11 +496,11 @@ export const fileRepo = {
       INSERT INTO files (
         id, source_id, key, size, etag, last_modified, content_type,
         extension, category, duration, width, height, codec, bitrate,
-        local_status, local_size, local_mtime, scanned_at
+        local_status, local_size, local_mtime, local_file_path, scanned_at
       ) VALUES (
         @id, @sourceId, @key, @size, @etag, @lastModified, @contentType,
         @extension, @category, @duration, @width, @height, @codec, @bitrate,
-        @localStatus, @localSize, @localMtime, @scannedAt
+        @localStatus, @localSize, @localMtime, @localFilePath, @scannedAt
       )
       ON CONFLICT(id) DO UPDATE SET
         size = excluded.size,
@@ -494,6 +517,7 @@ export const fileRepo = {
         local_status = excluded.local_status,
         local_size = excluded.local_size,
         local_mtime = excluded.local_mtime,
+        local_file_path = excluded.local_file_path,
         scanned_at = excluded.scanned_at
     `);
 
@@ -508,6 +532,7 @@ export const fileRepo = {
           bitrate: item.bitrate ?? null,
           localSize: item.localSize ?? null,
           localMtime: item.localMtime ?? null,
+          localFilePath: item.localFilePath ?? null,
         });
       }
     });
@@ -515,9 +540,15 @@ export const fileRepo = {
     transaction(files);
   },
 
-  updateLocalStatus(id: string, status: StorageFile['localStatus'], size?: number, mtime?: number): void {
-    db.prepare('UPDATE files SET local_status = ?, local_size = ?, local_mtime = ? WHERE id = ?')
-      .run(status, size ?? null, mtime ?? null, id);
+  updateLocalStatus(
+    id: string,
+    status: StorageFile['localStatus'],
+    size?: number,
+    mtime?: number,
+    filePath?: string
+  ): void {
+    db.prepare('UPDATE files SET local_status = ?, local_size = ?, local_mtime = ?, local_file_path = ? WHERE id = ?')
+      .run(status, size ?? null, mtime ?? null, filePath ?? null, id);
   },
 
   getByDateRange(
@@ -759,6 +790,7 @@ function mapFileRow(row: any): StorageFile {
     localStatus: row.local_status,
     localSize: row.local_size ?? undefined,
     localMtime: row.local_mtime ?? undefined,
+    localFilePath: row.local_file_path ?? undefined,
     scannedAt: row.scanned_at,
   };
 }

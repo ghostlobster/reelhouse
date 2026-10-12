@@ -11,12 +11,50 @@ import { scannerService } from './services/scannerService.js';
 import { metricsService } from './services/metricsService.js';
 import { downloadService } from './services/downloadService.js';
 import { StorageSource, DownloadBatch } from './types.js';
+import { BadRequestError, NotFoundError } from './errors.js';
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
 
-app.use(cors());
+// The bundled client is served same-origin (or via the Vite dev proxy), so only explicitly
+// allowed origins may call the API cross-origin. This server writes to the local disk, so an
+// open CORS policy would let any visited web page trigger downloads into arbitrary folders.
+const allowedOrigins = new Set(
+  (process.env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean)
+);
+
+/** Requests without an Origin (non-browser clients) or from the serving host itself are trusted */
+function isOriginAllowed(origin: string | undefined, host: string | undefined): boolean {
+  if (!origin) return true;
+  if (allowedOrigins.has(origin)) return true;
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
+app.use(cors({ origin: (origin, cb) => cb(null, !origin || allowedOrigins.has(origin)) }));
+
+// Block cross-site state-changing requests, including CORS "simple" requests that skip preflight
+app.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  if (isOriginAllowed(req.headers.origin, req.headers.host)) return next();
+  res.status(403).json({ error: 'Origin not allowed' });
+});
+
+// WebSockets ignore CORS, so check the Origin on the handshake to keep other sites from
+// subscribing to scan and download events
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  verifyClient: ({ origin, req }: { origin: string; req: http.IncomingMessage }) =>
+    isOriginAllowed(origin, req.headers.host),
+});
+
 app.use(express.json());
 
 // Broadcast to WebSocket clients
@@ -45,6 +83,35 @@ downloadService.onProgress((event) => {
 });
 
 const paramId = (req: Request): string => (Array.isArray(req.params.id) ? req.params.id[0] : req.params.id) || '';
+
+const sendError = (res: Response, err: any) => {
+  const status = err instanceof BadRequestError ? 400 : err instanceof NotFoundError ? 404 : 500;
+  res.status(status).json({ error: err.message });
+};
+
+/**
+ * Normalize a user-supplied directory path. Empty/missing → undefined; otherwise an absolute path.
+ */
+function parseDirectoryPath(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new BadRequestError(`${field} must be a string`);
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.includes('\0')) throw new BadRequestError(`${field} contains invalid characters`);
+  return path.resolve(trimmed);
+}
+
+/**
+ * Locate an already-downloaded copy of a file: the source's default directory first,
+ * then the path recorded when it was downloaded to a custom location.
+ */
+function findLocalCopy(source: StorageSource, key: string): string | undefined {
+  const candidates = [
+    source.localPath ? path.join(source.localPath, key) : undefined,
+    fileRepo.getByKey(source.id, key)?.localFilePath,
+  ];
+  return candidates.find((p): p is string => Boolean(p) && fs.existsSync(p!));
+}
 
 // ---------------- API ROUTES ----------------
 
@@ -75,7 +142,7 @@ app.post('/api/sources', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Name, provider, and bucket are required' });
     }
 
-    const defaultLocalPath = data.localPath ? data.localPath.trim() : '';
+    const defaultLocalPath = parseDirectoryPath(data.localPath, 'localPath') || '';
     if (defaultLocalPath && !fs.existsSync(defaultLocalPath)) {
       try { fs.mkdirSync(defaultLocalPath, { recursive: true }); } catch {}
     }
@@ -104,7 +171,7 @@ app.post('/api/sources', (req: Request, res: Response) => {
     sourceRepo.insert(newSource);
     res.status(201).json(newSource);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -125,7 +192,8 @@ app.put('/api/sources/:id', (req: Request, res: Response) => {
       secretKey: data.secretKey ?? existing.secretKey,
       forcePathStyle: data.forcePathStyle !== undefined ? Boolean(data.forcePathStyle) : existing.forcePathStyle,
       cdnUrl: data.cdnUrl ?? existing.cdnUrl,
-      localPath: data.localPath ?? existing.localPath,
+      localPath:
+        data.localPath === undefined ? existing.localPath : parseDirectoryPath(data.localPath, 'localPath') || '',
       readOnly: data.readOnly !== undefined ? Boolean(data.readOnly) : existing.readOnly,
       updatedAt: Date.now(),
     };
@@ -137,7 +205,7 @@ app.put('/api/sources/:id', (req: Request, res: Response) => {
     sourceRepo.update(updated);
     res.json(updated);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -285,10 +353,15 @@ app.post('/api/sources/:id/download-folder', (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Source not found' });
     }
 
-    const { batch, tasks } = downloadService.enqueueFolder(id, folderPrefix, Boolean(onlyMissing), destinationDir);
+    const { batch, tasks } = downloadService.enqueueFolder(
+      id,
+      folderPrefix,
+      Boolean(onlyMissing),
+      parseDirectoryPath(destinationDir, 'destinationDir')
+    );
     res.json({ batch, tasksCount: tasks.length });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -302,11 +375,9 @@ app.get('/api/sources/:id/stream', async (req: Request, res: Response) => {
     if (!key) return res.status(400).send('File key is required');
 
     // Check if file is already on local on-premise disk
-    if (source.localPath) {
-      const localFilePath = path.join(source.localPath, key);
-      if (fs.existsSync(localFilePath)) {
-        return res.sendFile(localFilePath);
-      }
+    const localFilePath = findLocalCopy(source, key);
+    if (localFilePath) {
+      return res.sendFile(path.resolve(localFilePath));
     }
 
     // Stream from S3 with Range headers
@@ -350,12 +421,10 @@ app.get('/api/sources/:id/raw', async (req: Request, res: Response) => {
     if (!key) return res.status(400).send('Key required');
 
     // If local exists, read local
-    if (source.localPath) {
-      const localFilePath = path.join(source.localPath, key);
-      if (fs.existsSync(localFilePath)) {
-        const content = fs.readFileSync(localFilePath, 'utf8');
-        return res.json({ content });
-      }
+    const localFilePath = findLocalCopy(source, key);
+    if (localFilePath) {
+      const content = fs.readFileSync(localFilePath, 'utf8');
+      return res.json({ content });
     }
 
     // Remote range read up to 256KB for preview
@@ -399,8 +468,9 @@ app.get('/api/downloads', (_req: Request, res: Response) => {
 
 app.post('/api/downloads', (req: Request, res: Response) => {
   try {
-    const { sourceId, keys, key, destinationDir } = req.body;
+    const { sourceId, keys, key } = req.body;
     if (!sourceId) return res.status(400).json({ error: 'sourceId required' });
+    const destinationDir = parseDirectoryPath(req.body.destinationDir, 'destinationDir');
 
     if (Array.isArray(keys) && keys.length > 0) {
       const result = downloadService.enqueueBatch(sourceId, keys, destinationDir);
@@ -412,7 +482,7 @@ app.post('/api/downloads', (req: Request, res: Response) => {
 
     res.status(400).json({ error: 'Provide key or keys array' });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -421,10 +491,13 @@ app.post('/api/downloads/missing', (req: Request, res: Response) => {
     const { sourceId, destinationDir } = req.body;
     if (!sourceId) return res.status(400).json({ error: 'sourceId required' });
 
-    const result = downloadService.enqueueAllMissing(sourceId, destinationDir);
+    const result = downloadService.enqueueAllMissing(
+      sourceId,
+      parseDirectoryPath(destinationDir, 'destinationDir')
+    );
     res.json(result);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -492,11 +565,11 @@ app.post('/api/sources/:id/download-range', (req: Request, res: Response) => {
       endDate: endDate ? Number(endDate) : undefined,
       onlyMissing: Boolean(onlyMissing),
       updateCheckpoint: Boolean(updateCheckpoint),
-      destinationDir,
+      destinationDir: parseDirectoryPath(destinationDir, 'destinationDir'),
     });
     res.json(result);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    sendError(res, err);
   }
 });
 
@@ -835,6 +908,6 @@ if (fs.existsSync(CLIENT_DIST)) {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`[CDN Buddy Server] Running at http://localhost:${PORT}`);
-  console.log(`[CDN Buddy Server] WebSocket ready at ws://localhost:${PORT}/ws`);
+  console.log(`[Reelhouse Server] Running at http://localhost:${PORT}`);
+  console.log(`[Reelhouse Server] WebSocket ready at ws://localhost:${PORT}/ws`);
 });

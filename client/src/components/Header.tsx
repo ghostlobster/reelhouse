@@ -67,7 +67,7 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="shrink-0 flex flex-col justify-center">
                 <div className="flex items-center gap-2 whitespace-nowrap">
                   <span className="font-extrabold text-lg tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-300 bg-clip-text text-transparent inline-block leading-tight">
-                    CDN Buddy
+                    Reelhouse
                   </span>
                   <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 whitespace-nowrap">
                     HYBRID

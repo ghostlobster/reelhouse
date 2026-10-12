@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { StorageSource } from '../types';
 import { formatBytes } from '../utils/formatters';
+import { getSuggestedDownloadPath } from '../utils/downloadPath';
 
 interface DownloadLocationModalProps {
   isOpen: boolean;
@@ -54,20 +55,16 @@ export const DownloadLocationModal: React.FC<DownloadLocationModalProps> = ({
     }
 
     // Otherwise query backend for OS-appropriate suggested path
-    fetch(`/api/system/default-download-path?sourceName=${encodeURIComponent(source.name)}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.suggestedPath) {
-          setDefaultSuggestedPath(data.suggestedPath);
-          setDestinationPath(data.suggestedPath);
-        }
-      })
-      .catch(() => {
-        const fallback = `./downloads/${source.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-        setDefaultSuggestedPath(fallback);
-        setDestinationPath(fallback);
-      });
-  }, [isOpen, source]);
+    let cancelled = false;
+    getSuggestedDownloadPath(source.name).then((suggested) => {
+      if (cancelled) return;
+      setDefaultSuggestedPath(suggested);
+      setDestinationPath(suggested);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, source.id]);
 
   if (!isOpen) return null;
 

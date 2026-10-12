@@ -1,4 +1,4 @@
-# CDN Buddy 🚀
+# Reelhouse 🚀
 
 > **Hybrid CDN & Object Storage Asset Hub for On-Premise Servers**  
 > Brand-agnostic management, metrics analytics, video duration extraction, seamless media previews, and on-premise local disk mirroring.
@@ -144,5 +144,5 @@ If you don't have S3 credentials immediately available, click the **"Load Demo C
 ## 🔒 Security & Safety
 
 - **Read-Only by Default**: Designed specifically for read-only browsing, inspection, and one-way downloads from CDN/S3 to the on-premise box.
-- **Credential Storage**: Credentials are stored locally in the embedded SQLite database (`data/cdn_buddy.db`) on your on-premise box, never sent to third parties.
+- **Credential Storage**: Credentials are stored locally in the embedded SQLite database (`data/reelhouse.db`) on your on-premise box, never sent to third parties.
 - **Range-Based Media Probe**: Remote video durations are extracted by reading small atom headers over HTTP Range requests, avoiding full video file downloads during scans.

@@ -1,5 +1,5 @@
 {
-  "name": "cdn-buddy",
+  "name": "reelhouse",
   "version": "1.0.0",
   "description": "Hybrid CDN and Object Storage File Manager with Metrics and Previews",
   "main": "server/src/index.ts",

@@ -124,7 +124,7 @@ export class StorageService {
 
       if (key.endsWith('.json')) {
         sampleData = Buffer.from(JSON.stringify({
-          app: 'cdn-buddy',
+          app: 'reelhouse',
           edgeRouting: {
             cacheTTL: 86400,
             regions: ['us-east', 'eu-west', 'ap-southeast'],
@@ -135,14 +135,14 @@ export class StorageService {
         }, null, 2));
         contentType = 'application/json';
       } else if (key.endsWith('.svg')) {
-        sampleData = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="100%" height="100%" fill="#0f172a"/><circle cx="300" cy="200" r="100" fill="#06b6d4"/><text x="300" y="210" font-family="sans-serif" font-size="24" font-weight="bold" fill="#ffffff" text-anchor="middle">CDN Buddy Asset</text></svg>`);
+        sampleData = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400"><rect width="100%" height="100%" fill="#0f172a"/><circle cx="300" cy="200" r="100" fill="#06b6d4"/><text x="300" y="210" font-family="sans-serif" font-size="24" font-weight="bold" fill="#ffffff" text-anchor="middle">Reelhouse Asset</text></svg>`);
         contentType = 'image/svg+xml';
       } else if (key.endsWith('.mp4') || key.endsWith('.webm') || key.endsWith('.mov') || key.endsWith('.mkv')) {
         // High quality minimal valid fast-start MP4 video container
         sampleData = Buffer.from('AAAAHGZ0eXBpc29tAAAAAGlzb21tcDQxAAAAAG1vb3YAAABsbXZoZAAAAABAAAAAA+gAAAPoAAAD6AAAAPoAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
         contentType = 'video/mp4';
       } else {
-        sampleData = Buffer.from(`CDN Buddy Simulated Asset: ${key}\nTimestamp: ${new Date().toISOString()}\nSource: ${source.name}`);
+        sampleData = Buffer.from(`Reelhouse Simulated Asset: ${key}\nTimestamp: ${new Date().toISOString()}\nSource: ${source.name}`);
         contentType = 'text/plain';
       }
 

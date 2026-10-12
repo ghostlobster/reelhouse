@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import { storageService } from './storageService.js';
 import { sourceRepo, fileRepo, downloadRepo } from '../db.js';
 import { DownloadTask, DownloadBatch, DateRangeDownloadRequest, StorageSource } from '../types.js';
+import { NotFoundError } from '../errors.js';
 
 export interface DownloadProgressEvent {
   taskId: string;
@@ -53,7 +54,7 @@ export class DownloadService {
     batchId?: string
   ): DownloadTask {
     const source = sourceRepo.getById(sourceId);
-    if (!source) throw new Error('Source not found');
+    if (!source) throw new NotFoundError('Source not found');
 
     const file = fileRepo.getByKey(sourceId, fileKey);
     const size = file ? file.size : 0;
@@ -61,7 +62,12 @@ export class DownloadService {
     const baseDir = customDestDir || source.localPath || path.join(process.cwd(), 'downloads', source.name);
     // Robust folder structure preservation: remove leading slashes and map path segments
     const normalizedRelativePath = fileKey.replace(/^[/\\]+/, '').split('/').join(path.sep);
-    const destinationPath = path.resolve(baseDir, normalizedRelativePath);
+    const resolvedBase = path.resolve(baseDir);
+    const destinationPath = path.resolve(resolvedBase, normalizedRelativePath);
+    // Reject keys like "../../x" that would escape the destination directory
+    if (!destinationPath.startsWith(resolvedBase + path.sep)) {
+      throw new Error(`File key escapes destination directory: ${fileKey}`);
+    }
 
     const taskId = `dl-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const task: DownloadTask = {
@@ -104,7 +110,7 @@ export class DownloadService {
     customDestDir?: string
   ): { batch: DownloadBatch; tasks: DownloadTask[] } {
     const source = sourceRepo.getById(sourceId);
-    if (!source) throw new Error('Source not found');
+    if (!source) throw new NotFoundError('Source not found');
 
     const batchId = `batch-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     let totalSize = 0;
@@ -140,7 +146,7 @@ export class DownloadService {
     options: DateRangeDownloadRequest
   ): { batch: DownloadBatch; tasks: DownloadTask[] } {
     const source = sourceRepo.getById(options.sourceId);
-    if (!source) throw new Error('Source not found');
+    if (!source) throw new NotFoundError('Source not found');
 
     const files = fileRepo.getByDateRange(options.sourceId, {
       startDate: options.startDate,
@@ -193,7 +199,7 @@ export class DownloadService {
    */
   public enqueueAllMissing(sourceId: string, customDestDir?: string): { batch: DownloadBatch; tasks: DownloadTask[] } {
     const source = sourceRepo.getById(sourceId);
-    if (!source) throw new Error('Source not found');
+    if (!source) throw new NotFoundError('Source not found');
 
     const result = fileRepo.getBySource(sourceId, { limit: 10000 });
     const missing = result.files.filter((f) => f.localStatus === 'missing');
@@ -231,7 +237,7 @@ export class DownloadService {
     customDestDir?: string
   ): { batch: DownloadBatch; tasks: DownloadTask[] } {
     const source = sourceRepo.getById(sourceId);
-    if (!source) throw new Error('Source not found');
+    if (!source) throw new NotFoundError('Source not found');
 
     const result = fileRepo.getBySource(sourceId, { prefix: folderPrefix, limit: 10000 });
     const targetFiles = onlyMissing
@@ -362,7 +368,8 @@ export class DownloadService {
       // Update file's local status in DB
       const fileId = `${source.id}:${task.fileKey}`;
       const stat = fs.statSync(task.destinationPath);
-      fileRepo.updateLocalStatus(fileId, 'synced', stat.size, Math.floor(stat.mtimeMs));
+      // Remember the actual path so scans and previews find copies saved outside source.localPath
+      fileRepo.updateLocalStatus(fileId, 'synced', stat.size, Math.floor(stat.mtimeMs), task.destinationPath);
 
       this.broadcast({
         taskId: task.id,

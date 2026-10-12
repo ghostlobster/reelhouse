@@ -60,6 +60,7 @@ export interface StorageFile {
   localStatus: LocalSyncStatus;
   localSize?: number;
   localMtime?: number;
+  localFilePath?: string; // Absolute path of the downloaded copy (may live outside source.localPath)
   scannedAt: number;
 }
 

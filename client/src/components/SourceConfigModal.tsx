@@ -13,6 +13,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { StorageSource, StorageProvider } from '../types';
+import { getSuggestedDownloadPath } from '../utils/downloadPath';
 
 interface SourceConfigModalProps {
   isOpen: boolean;
@@ -346,16 +347,7 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
                 </label>
                 <button
                   type="button"
-                  onClick={async () => {
-                    const srcName = name.trim() || 'source';
-                    try {
-                      const res = await fetch(`/api/system/default-download-path?sourceName=${encodeURIComponent(srcName)}`);
-                      const data = await res.json();
-                      if (data.suggestedPath) setLocalPath(data.suggestedPath);
-                    } catch {
-                      setLocalPath(`./downloads/${srcName.replace(/[^a-zA-Z0-9_-]/g, '_')}`);
-                    }
-                  }}
+                  onClick={async () => setLocalPath(await getSuggestedDownloadPath(name))}
                   className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 transition-colors"
                 >
                   <RotateCcw className="w-2.5 h-2.5" />

@@ -166,7 +166,10 @@ export async function inspectMediaBuffer(
   // Next try music-metadata parser on the buffer
   if (!result.duration) {
     try {
-      const metadata = await mm.parseBuffer(buffer, { mimeType, duration: true, skipCovers: true } as any);
+      const metadata = await mm.parseBuffer(buffer, mimeType ? { mimeType } : undefined, {
+        duration: true,
+        skipCovers: true,
+      });
       if (metadata.format.duration) {
         result.duration = metadata.format.duration;
       }

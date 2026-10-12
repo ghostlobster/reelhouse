@@ -26,7 +26,7 @@ interface DateRangeDownloadModalProps {
     endDate?: number;
     onlyMissing: boolean;
     updateCheckpoint: boolean;
-  }) => Promise<void>;
+  }) => Promise<boolean>; // false when the user backed out of the location prompt
 }
 
 export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
@@ -144,18 +144,20 @@ export const DateRangeDownloadModal: React.FC<DateRangeDownloadModalProps> = ({
       const startMs = startDate ? startDate.getTime() : undefined;
       const endMs = endDate ? endDate.getTime() : undefined;
 
-      onClose();
-      await onStartDownload({
+      const started = await onStartDownload({
         startDate: startMs,
         endDate: endMs,
         onlyMissing,
         updateCheckpoint,
       });
+      if (started) {
+        onClose();
+        return;
+      }
     } catch (err: any) {
       alert(err.message || 'Download failed');
-    } finally {
-      setSubmitting(false);
     }
+    setSubmitting(false);
   };
 
   return (

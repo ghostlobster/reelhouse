@@ -15,6 +15,7 @@ import {
   Info,
 } from 'lucide-react';
 import { StorageSource } from '../types';
+import { getSuggestedDownloadPath, sanitizeSourceName } from '../utils/downloadPath';
 
 interface SourceSettingsProps {
   source: StorageSource;
@@ -67,7 +68,7 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
   };
 
   const handleDelete = async () => {
-    if (confirm(`Are you sure you want to delete source "${source.name}"? This removes indexed metrics from CDN Buddy.`)) {
+    if (confirm(`Are you sure you want to delete source "${source.name}"? This removes indexed metrics from Reelhouse.`)) {
       await onDeleteSource(source.id);
     }
   };
@@ -207,19 +208,11 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={async () => {
-                      try {
-                        const res = await fetch(`/api/system/default-download-path?sourceName=${encodeURIComponent(name || source.name)}`);
-                        const data = await res.json();
-                        if (data.suggestedPath) setLocalPath(data.suggestedPath);
-                      } catch {
-                        setLocalPath(`./downloads/${(name || source.name).replace(/[^a-zA-Z0-9_-]/g, '_')}`);
-                      }
-                    }}
+                    onClick={async () => setLocalPath(await getSuggestedDownloadPath(name || source.name))}
                     className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 transition-colors"
                   >
                     <RotateCcw className="w-3 h-3" />
-                    <span>Set Default (downloads/{name || source.name})</span>
+                    <span>Set Default (downloads/{sanitizeSourceName(name || source.name)})</span>
                   </button>
                   {localPath && (
                     <button
