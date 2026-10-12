@@ -4,7 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import { storageService } from './storageService.js';
 import { sourceRepo, fileRepo, downloadRepo } from '../db.js';
 import { DownloadTask, DownloadBatch, DateRangeDownloadRequest, StorageSource } from '../types.js';
-import { NotFoundError } from '../errors.js';
+import { BadRequestError, NotFoundError } from '../errors.js';
 
 export interface DownloadProgressEvent {
   taskId: string;
@@ -66,7 +66,7 @@ export class DownloadService {
     const destinationPath = path.resolve(resolvedBase, normalizedRelativePath);
     // Reject keys like "../../x" that would escape the destination directory
     if (!destinationPath.startsWith(resolvedBase + path.sep)) {
-      throw new Error(`File key escapes destination directory: ${fileKey}`);
+      throw new BadRequestError(`File key escapes destination directory: ${fileKey}`);
     }
 
     const taskId = `dl-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
