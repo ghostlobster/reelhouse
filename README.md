@@ -11,7 +11,7 @@
   - **AWS S3**: Standard regions and S3 buckets.
   - **Cloudflare R2**: Zero-egress endpoint integration (`https://<account-id>.r2.cloudflarestorage.com`).
   - **MinIO (Self-Hosted)**: Path-style addressing (`forcePathStyle: true`) for on-premise deployments.
-  - **KeyCDN**: Storage zone and pull zone origin management.
+  - **KeyCDN**: Storage zones over SFTP (host, port, username, password); set the pull zone as the Public CDN Domain for direct previews.
   - **Wasabi & Backblaze B2**: Flat-rate hot cloud storage compatibility.
   - **Generic S3 / HTTP Origin**: Any S3-compatible service or CDN edge origin.
 
@@ -78,8 +78,8 @@
 │  └───────────┬───────────┘       └───────────┬───────────┘  │
 │              │                               │              │
 │  ┌───────────▼───────────┐       ┌───────────▼───────────┐  │
-│  │     SQLite DB (WAL)   │       │   Streaming Proxy     │  │
-│  │   better-sqlite3      │       │   (Range 206 / Seek)  │  │
+│  │   PostgreSQL 17       │       │   Streaming Proxy     │  │
+│  │   (node-postgres)     │       │   (Range 206 / Seek)  │  │
 │  └───────────────────────┘       └───────────────────────┘  │
 └──────────────┬───────────────────────────────┬──────────────┘
                │ S3 Protocol                   │ Atomic Writes
@@ -93,19 +93,23 @@
 
 ## 🚀 Quick Start
 
-### 1. Start Full Application (Production Mode)
+### 1. Start Full Application (Docker)
 
-Starts the consolidated server at `http://localhost:3001` serving both the REST API and the frontend dashboard:
+Starts Postgres and the app, serving both the REST API and the frontend dashboard:
 
 ```bash
-npm run server
+docker compose up -d --build
 ```
 
-Open your browser to: **`http://localhost:3001`**
+Open your browser to: **`http://127.0.0.1:3010`**
+
+On first start, data from an earlier SQLite-based install (`data/reelhouse.db`) is imported into Postgres automatically; the SQLite file is kept as a backup.
+
+Without Docker for the app itself: `docker compose up -d postgres`, then `npm run server` and open **`http://localhost:3001`**.
 
 ### 2. Start in Development Mode (Live HMR)
 
-Runs both the backend API (port 3001) and Vite frontend (port 5173 with proxy):
+Runs both the backend API (port 3001) and Vite frontend (port 5173 with proxy). Needs Postgres running (`docker compose up -d postgres`):
 
 ```bash
 npm run dev
@@ -144,5 +148,5 @@ If you don't have S3 credentials immediately available, click the **"Load Demo C
 ## 🔒 Security & Safety
 
 - **Read-Only by Default**: Designed specifically for read-only browsing, inspection, and one-way downloads from CDN/S3 to the on-premise box.
-- **Credential Storage**: Credentials are stored locally in the embedded SQLite database (`data/reelhouse.db`) on your on-premise box, never sent to third parties.
+- **Credential Storage**: Credentials are stored in the local Postgres database (Docker volume `reelhouse-pgdata`, reachable only from this machine) on your on-premise box, never sent to third parties. They are stored in plain text, so protect access to that volume and to database backups.
 - **Range-Based Media Probe**: Remote video durations are extracted by reading small atom headers over HTTP Range requests, avoiding full video file downloads during scans.

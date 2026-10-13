@@ -9,6 +9,7 @@ import {
   BarChart3,
   FolderTree,
   Sliders,
+  Film,
   Sparkles,
   Calendar,
   History,
@@ -23,7 +24,7 @@ interface HeaderProps {
   onOpenAddModal: () => void;
   onOpenDownloadsDrawer: () => void;
   onOpenDateRangeModal: () => void;
-  onTriggerScan: () => void;
+  onTriggerScan: (deep: boolean) => void;
   onDownloadMissing: () => void;
   onSeedDemo: () => void;
   isScanning: boolean;
@@ -129,23 +130,34 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* Scan Action */}
-            <button
-              onClick={onTriggerScan}
-              disabled={isScanning || !activeSource}
-              className={`flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl transition-all border whitespace-nowrap shrink-0 ${
-                isScanning
-                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 animate-pulse'
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/80 hover:border-slate-600'
-              }`}
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin text-amber-400' : 'text-slate-400'}`} />
-              {isScanning ? (
+            {/* Scan Actions: quick (file list only) or deep (also video lengths) */}
+            {isScanning ? (
+              <span className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl border whitespace-nowrap shrink-0 bg-amber-500/10 text-amber-300 border-amber-500/30 animate-pulse">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
                 <span>Scanning {scanProgress?.scannedFiles ? `(${scanProgress.scannedFiles})` : '...'}</span>
-              ) : (
-                <span>Scan Source</span>
-              )}
-            </button>
+              </span>
+            ) : (
+              <div className="flex items-center shrink-0 rounded-xl border border-slate-700/80 overflow-hidden">
+                <button
+                  onClick={() => onTriggerScan(false)}
+                  disabled={!activeSource}
+                  title="Quick scan: refresh the file list, sizes and dates. Video lengths are kept from earlier scans; new videos are not measured."
+                  className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors whitespace-nowrap disabled:opacity-50"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Quick Scan</span>
+                </button>
+                <button
+                  onClick={() => onTriggerScan(true)}
+                  disabled={!activeSource}
+                  title="Deep scan: also read the length of new or changed videos and audio (slower)."
+                  className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border-l border-slate-700/80 transition-colors whitespace-nowrap disabled:opacity-50"
+                >
+                  <Film className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Deep</span>
+                </button>
+              </div>
+            )}
 
             {/* Download by Date Range Action */}
             <button

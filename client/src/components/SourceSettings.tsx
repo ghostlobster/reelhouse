@@ -6,7 +6,7 @@ import {
   Shield,
   HardDrive,
   Globe,
-  Key,
+  Database,
   Check,
   AlertTriangle,
   FolderTree,
@@ -16,6 +16,15 @@ import {
 } from 'lucide-react';
 import { StorageSource } from '../types';
 import { getSuggestedDownloadPath, sanitizeSourceName } from '../utils/downloadPath';
+import {
+  SourceConnectionFields,
+  ConnectionDraft,
+  ConnectionTestBanner,
+  draftFromSource,
+  connectionPayload,
+  isConnectionComplete,
+  testConnection,
+} from './SourceConnectionFields';
 
 interface SourceSettingsProps {
   source: StorageSource;
@@ -29,15 +38,24 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
   onDeleteSource,
 }) => {
   const [name, setName] = useState(source.name);
-  const [endpoint, setEndpoint] = useState(source.endpoint || '');
-  const [bucket, setBucket] = useState(source.bucket || '');
-  const [region, setRegion] = useState(source.region || '');
-  const [accessKey, setAccessKey] = useState(source.accessKey || '');
-  const [secretKey, setSecretKey] = useState(source.secretKey || '');
+  const [connection, setConnection] = useState<ConnectionDraft>(() => draftFromSource(source));
   const [cdnUrl, setCdnUrl] = useState(source.cdnUrl || '');
   const [localPath, setLocalPath] = useState(source.localPath || '');
   const [readOnly, setReadOnly] = useState(source.readOnly !== false);
-  const [forcePathStyle, setForcePathStyle] = useState(source.forcePathStyle ?? false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const updateConnection = (patch: Partial<ConnectionDraft>) => {
+    setConnection((prev) => ({ ...prev, ...patch }));
+    setTestResult(null);
+  };
+
+  const handleTestConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    setTestResult(await testConnection(connection));
+    setTesting(false);
+  };
 
   const [saving, setSaving] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -48,15 +66,10 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
     try {
       await onUpdateSource({
         name,
-        endpoint,
-        bucket,
-        region,
-        accessKey,
-        secretKey,
+        ...connectionPayload(connection),
         cdnUrl,
         localPath,
         readOnly,
-        forcePathStyle,
       });
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2500);
@@ -92,74 +105,21 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
         </div>
 
         <form onSubmit={handleSave} className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Source Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Bucket Name</label>
-              <input
-                type="text"
-                value={bucket}
-                onChange={(e) => setBucket(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="md:col-span-2">
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Endpoint URL</label>
-              <input
-                type="text"
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Region</label>
-              <input
-                type="text"
-                value={region}
-                onChange={(e) => setRegion(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <Key className="w-3.5 h-3.5 text-cyan-400" />
-                Access Key ID
-              </label>
-              <input
-                type="text"
-                value={accessKey}
-                onChange={(e) => setAccessKey(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <Key className="w-3.5 h-3.5 text-cyan-400" />
-                Secret Access Key
-              </label>
-              <input
-                type="password"
-                value={secretKey}
-                onChange={(e) => setSecretKey(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-          </div>
+          <SourceConnectionFields
+            draft={connection}
+            onChange={updateConnection}
+            nameField={
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Source Name</label>
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+                />
+              </div>
+            }
+          />
 
           {/* Public CDN URL */}
           <div>
@@ -245,16 +205,6 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
             <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
               <input
                 type="checkbox"
-                checked={forcePathStyle}
-                onChange={(e) => setForcePathStyle(e.target.checked)}
-                className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0"
-              />
-              <span>Force Path Style (MinIO)</span>
-            </label>
-
-            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
-              <input
-                type="checkbox"
                 checked={readOnly}
                 onChange={(e) => setReadOnly(e.target.checked)}
                 className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0"
@@ -266,6 +216,8 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
             </label>
           </div>
 
+          <ConnectionTestBanner result={testResult} />
+
           <div className="flex items-center justify-between pt-6 border-t border-slate-800">
             <button
               type="button"
@@ -276,9 +228,19 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
               <span>Delete Source</span>
             </button>
 
+            <div className="flex items-center gap-3">
+            <button
+              type="button"
+              disabled={testing || !isConnectionComplete(connection)}
+              onClick={handleTestConnection}
+              className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 transition-all disabled:opacity-50"
+            >
+              <Database className="w-3.5 h-3.5 text-cyan-400" />
+              <span>{testing ? 'Testing...' : 'Test Connection'}</span>
+            </button>
             <button
               type="submit"
-              disabled={saving}
+              disabled={saving || !isConnectionComplete(connection)}
               className="px-6 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold flex items-center gap-2 shadow-lg shadow-cyan-500/20 transition-all disabled:opacity-50"
             >
               {savedSuccess ? (
@@ -293,6 +255,7 @@ export const SourceSettings: React.FC<SourceSettingsProps> = ({
                 </>
               )}
             </button>
+            </div>
           </div>
         </form>
       </div>

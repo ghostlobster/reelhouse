@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: reelhouse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reelhouse
+      POSTGRES_USER: reelhouse
+      POSTGRES_PASSWORD: ${REELHOUSE_DB_PASSWORD:-reelhouse}
+    ports:
+      # Localhost only, for `npm run dev` and database tools on this machine
+      - "127.0.0.1:${REELHOUSE_DB_PORT:-5435}:5432"
+    volumes:
+      - reelhouse-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reelhouse -d reelhouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  reelhouse:
+    build: .
+    image: reelhouse:latest
+    container_name: reelhouse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Bound to localhost only: the server writes to disk on request
+      - "127.0.0.1:${REELHOUSE_PORT:-3010}:3001"
+    environment:
+      - PORT=3001
+      - DATABASE_URL=postgres://reelhouse:${REELHOUSE_DB_PASSWORD:-reelhouse}@postgres:5432/reelhouse
+    volumes:
+      # Holds the old SQLite database: imported into Postgres once on first start, then kept as a backup
+      - reelhouse-data:/app/data
+      # Mirrored files land on the host so they are usable outside the container
+      - ./downloads:/app/downloads
+
+volumes:
+  reelhouse-data:
+  reelhouse-pgdata:

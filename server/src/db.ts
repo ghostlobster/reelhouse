@@ -1,31 +1,69 @@
-import Database from 'better-sqlite3';
-import path from 'node:path';
-import fs from 'node:fs';
-import { StorageSource, StorageFile, DownloadTask, DownloadBatch, ScanMetrics, HierarchyFolder, HierarchyBreadcrumb, HierarchyResponse } from './types.js';
+import pg from 'pg';
+import { StorageSource, StorageFile, DownloadTask, DownloadBatch, HierarchyFolder, HierarchyBreadcrumb, HierarchyResponse } from './types.js';
 
-const DB_DIR = path.resolve(process.cwd(), 'data');
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
+// Timestamps (Unix ms), sizes and COUNT(*) are BIGINT; SUM/AVG return NUMERIC. Both fit in a JS number.
+pg.types.setTypeParser(pg.types.builtins.INT8, (value) => parseInt(value, 10));
+pg.types.setTypeParser(pg.types.builtins.NUMERIC, (value) => parseFloat(value));
+
+export const DATABASE_URL = process.env.DATABASE_URL || 'postgres://reelhouse:reelhouse@localhost:5435/reelhouse';
+
+export const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10 });
+pool.on('error', (err) => console.error('Postgres pool error:', err.message));
+
+type Queryable = pg.Pool | pg.PoolClient;
+
+/** SQL here is written with ? placeholders; Postgres wants $1, $2, ... */
+const numberPlaceholders = (sql: string): string => {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
+};
+
+export async function query<T = any>(sql: string, params: unknown[] = [], client: Queryable = pool): Promise<T[]> {
+  return (await client.query(numberPlaceholders(sql), params)).rows as T[];
 }
 
-const dbPath = path.join(DB_DIR, 'reelhouse.db');
+export async function queryOne<T = any>(sql: string, params: unknown[] = [], client: Queryable = pool): Promise<T | undefined> {
+  return (await query<T>(sql, params, client))[0];
+}
 
-// Carry over the database from before the rename (CDN Buddy → Reelhouse), along with its WAL files
-const legacyDbPath = path.join(DB_DIR, 'cdn_buddy.db');
-if (!fs.existsSync(dbPath) && fs.existsSync(legacyDbPath)) {
-  for (const suffix of ['', '-wal', '-shm']) {
-    if (fs.existsSync(legacyDbPath + suffix)) fs.renameSync(legacyDbPath + suffix, dbPath + suffix);
+export async function transaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
-export const db = new Database(dbPath);
+/**
+ * Insert many rows with multi-row VALUES, split so each statement stays under
+ * Postgres's 65535-parameter limit. `suffix` is appended, e.g. an ON CONFLICT clause.
+ */
+export async function insertRows(
+  client: Queryable,
+  table: string,
+  columns: string[],
+  rows: unknown[][],
+  suffix = ''
+): Promise<void> {
+  const perStatement = Math.floor(60000 / columns.length);
+  for (let start = 0; start < rows.length; start += perStatement) {
+    const chunk = rows.slice(start, start + perStatement);
+    const values = chunk.map((_, r) => `(${columns.map((_, c) => `$${r * columns.length + c + 1}`).join(', ')})`);
+    await client.query(`INSERT INTO ${table} (${columns.join(', ')}) VALUES ${values.join(', ')} ${suffix}`, chunk.flat());
+  }
+}
 
-// Enable WAL mode for high concurrency
-db.pragma('journal_mode = WAL');
-db.pragma('synchronous = NORMAL');
+/** Escape LIKE wildcards so keys containing % or _ match literally. */
+const likeEscape = (value: string): string => value.replace(/[\\%_]/g, '\\$&');
 
-// Initialize schema
-db.exec(`
+export const SCHEMA = `
   CREATE TABLE IF NOT EXISTS sources (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -35,48 +73,48 @@ db.exec(`
     region TEXT,
     access_key TEXT,
     secret_key TEXT,
-    force_path_style INTEGER DEFAULT 0,
+    force_path_style BOOLEAN NOT NULL DEFAULT FALSE,
     cdn_url TEXT,
-    local_path TEXT NOT NULL,
-    read_only INTEGER DEFAULT 1,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    last_scanned_at INTEGER,
-    scan_status TEXT DEFAULT 'idle',
-    total_files INTEGER DEFAULT 0,
-    total_size INTEGER DEFAULT 0,
-    total_video_duration REAL DEFAULT 0
+    local_path TEXT NOT NULL DEFAULT '',
+    read_only BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    last_scanned_at BIGINT,
+    scan_status TEXT NOT NULL DEFAULT 'idle',
+    total_files BIGINT NOT NULL DEFAULT 0,
+    total_size BIGINT NOT NULL DEFAULT 0,
+    total_video_duration DOUBLE PRECISION NOT NULL DEFAULT 0,
+    last_checkpoint_mtime BIGINT
   );
 
+  -- key uses the "C" collation: byte order like SQLite, and prefix LIKE can use the index
   CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
-    source_id TEXT NOT NULL,
-    key TEXT NOT NULL,
-    size INTEGER NOT NULL,
+    source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    key TEXT COLLATE "C" NOT NULL,
+    size BIGINT NOT NULL,
     etag TEXT,
-    last_modified INTEGER NOT NULL,
+    last_modified BIGINT NOT NULL,
     content_type TEXT NOT NULL,
     extension TEXT NOT NULL,
     category TEXT NOT NULL,
-    duration REAL DEFAULT 0,
+    duration DOUBLE PRECISION DEFAULT 0,
     width INTEGER,
     height INTEGER,
     codec TEXT,
-    bitrate INTEGER,
+    bitrate BIGINT,
     local_status TEXT DEFAULT 'missing',
-    local_size INTEGER,
-    local_mtime INTEGER,
+    local_size BIGINT,
+    local_mtime BIGINT,
     local_file_path TEXT,
-    scanned_at INTEGER NOT NULL,
-    FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE
+    scanned_at BIGINT NOT NULL
   );
 
-  CREATE INDEX IF NOT EXISTS idx_files_source ON files(source_id);
-  CREATE INDEX IF NOT EXISTS idx_files_category ON files(category);
-  CREATE INDEX IF NOT EXISTS idx_files_size ON files(size);
-  CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(last_modified);
-  CREATE INDEX IF NOT EXISTS idx_files_duration ON files(duration);
-  CREATE INDEX IF NOT EXISTS idx_files_key ON files(key);
+  CREATE INDEX IF NOT EXISTS idx_files_source_key ON files(source_id, key);
+  CREATE INDEX IF NOT EXISTS idx_files_source_category ON files(source_id, category);
+  CREATE INDEX IF NOT EXISTS idx_files_source_mtime ON files(source_id, last_modified);
+  CREATE INDEX IF NOT EXISTS idx_files_source_size ON files(source_id, size);
+  CREATE INDEX IF NOT EXISTS idx_files_source_duration ON files(source_id, duration);
 
   CREATE TABLE IF NOT EXISTS download_tasks (
     id TEXT PRIMARY KEY,
@@ -84,33 +122,36 @@ db.exec(`
     source_id TEXT NOT NULL,
     file_key TEXT NOT NULL,
     destination_path TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    bytes_downloaded INTEGER DEFAULT 0,
-    speed_bps INTEGER DEFAULT 0,
+    size BIGINT NOT NULL,
+    bytes_downloaded BIGINT DEFAULT 0,
+    speed_bps BIGINT DEFAULT 0,
     status TEXT DEFAULT 'queued',
     error TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    completed_at INTEGER
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL,
+    completed_at BIGINT
   );
 
   CREATE INDEX IF NOT EXISTS idx_downloads_status ON download_tasks(status);
+  CREATE INDEX IF NOT EXISTS idx_downloads_source_key ON download_tasks(source_id, file_key);
+  CREATE INDEX IF NOT EXISTS idx_downloads_batch ON download_tasks(batch_id);
+  CREATE INDEX IF NOT EXISTS idx_downloads_created ON download_tasks(created_at);
 
   CREATE TABLE IF NOT EXISTS download_batches (
     id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
     source_name TEXT NOT NULL,
     type TEXT NOT NULL,
-    start_date INTEGER,
-    end_date INTEGER,
-    files_count INTEGER DEFAULT 0,
-    total_size INTEGER DEFAULT 0,
-    bytes_downloaded INTEGER DEFAULT 0,
+    start_date BIGINT,
+    end_date BIGINT,
+    files_count BIGINT DEFAULT 0,
+    total_size BIGINT DEFAULT 0,
+    bytes_downloaded BIGINT DEFAULT 0,
     status TEXT DEFAULT 'queued',
-    checkpoint_applied INTEGER DEFAULT 0,
-    checkpoint_timestamp INTEGER,
-    created_at INTEGER NOT NULL,
-    completed_at INTEGER
+    checkpoint_applied BOOLEAN NOT NULL DEFAULT FALSE,
+    checkpoint_timestamp BIGINT,
+    created_at BIGINT NOT NULL,
+    completed_at BIGINT
   );
 
   CREATE INDEX IF NOT EXISTS idx_batches_source ON download_batches(source_id);
@@ -119,138 +160,180 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS scan_history (
     id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
-    started_at INTEGER NOT NULL,
-    completed_at INTEGER,
+    started_at BIGINT NOT NULL,
+    completed_at BIGINT,
     status TEXT NOT NULL,
-    files_count INTEGER DEFAULT 0,
-    total_size INTEGER DEFAULT 0,
-    video_duration_seconds REAL DEFAULT 0,
+    files_count BIGINT DEFAULT 0,
+    total_size BIGINT DEFAULT 0,
+    video_duration_seconds DOUBLE PRECISION DEFAULT 0,
     metrics_json TEXT,
     error TEXT
   );
-`);
 
-// Safe migrations for existing SQLite databases
-try { db.exec('ALTER TABLE sources ADD COLUMN last_checkpoint_mtime INTEGER;'); } catch {}
-try { db.exec('ALTER TABLE download_tasks ADD COLUMN batch_id TEXT;'); } catch {}
-try { db.exec('ALTER TABLE download_tasks ADD COLUMN completed_at INTEGER;'); } catch {}
-try { db.exec('ALTER TABLE files ADD COLUMN local_file_path TEXT;'); } catch {}
-try { db.exec('CREATE INDEX IF NOT EXISTS idx_downloads_source_key ON download_tasks(source_id, file_key);'); } catch {}
-// Backfill locations of files downloaded before local_file_path was recorded
-try {
-  db.exec(`
-    UPDATE files SET local_file_path = (
-      SELECT t.destination_path FROM download_tasks t
-      WHERE t.source_id = files.source_id AND t.file_key = files.key AND t.status = 'completed'
-      ORDER BY t.completed_at DESC LIMIT 1
-    )
-    WHERE local_file_path IS NULL
-  `);
-} catch {}
-try { db.exec('CREATE INDEX IF NOT EXISTS idx_downloads_batch ON download_tasks(batch_id);'); } catch {}
+  -- One-off markers such as "SQLite data imported"
+  CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at BIGINT NOT NULL
+  );
+`;
 
+/**
+ * Wait for Postgres (it may still be starting next to us in Docker), then create the schema.
+ * Schema changes go here as idempotent statements (CREATE ... IF NOT EXISTS, ADD COLUMN IF NOT EXISTS).
+ */
+export async function initDatabase(): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await pool.query('SELECT 1');
+      break;
+    } catch (err: any) {
+      if (attempt >= 30) throw new Error(`Cannot reach Postgres at ${redactUrl(DATABASE_URL)}: ${err.message}`);
+      if (attempt === 1) console.log(`[Reelhouse Server] Waiting for Postgres at ${redactUrl(DATABASE_URL)}...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+  await pool.query(SCHEMA);
+}
 
+export const redactUrl = (url: string): string => url.replace(/\/\/([^:/@]+):[^@]*@/, '//$1:***@');
+
+export async function getMeta(key: string, client: Queryable = pool): Promise<string | undefined> {
+  return (await queryOne<{ value: string }>('SELECT value FROM app_meta WHERE key = ?', [key], client))?.value;
+}
+
+export async function setMeta(key: string, value: string, client: Queryable = pool): Promise<void> {
+  await query(
+    `INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [key, value, Date.now()],
+    client
+  );
+}
 
 // Repository helpers
 export const sourceRepo = {
-  getAll(): StorageSource[] {
-    const rows = db.prepare('SELECT * FROM sources ORDER BY created_at ASC').all() as any[];
+  async getAll(): Promise<StorageSource[]> {
+    const rows = await query('SELECT * FROM sources ORDER BY created_at ASC');
     return rows.map(mapSourceRow);
   },
 
-  getById(id: string): StorageSource | null {
-    const row = db.prepare('SELECT * FROM sources WHERE id = ?').get(id) as any;
+  async getById(id: string): Promise<StorageSource | null> {
+    const row = await queryOne('SELECT * FROM sources WHERE id = ?', [id]);
     return row ? mapSourceRow(row) : null;
   },
 
-  insert(source: StorageSource): void {
-    const stmt = db.prepare(`
-      INSERT INTO sources (
+  async insert(source: StorageSource): Promise<void> {
+    await query(
+      `INSERT INTO sources (
         id, name, provider, endpoint, bucket, region, access_key, secret_key,
         force_path_style, cdn_url, local_path, read_only, created_at, updated_at,
         last_scanned_at, scan_status, total_files, total_size, total_video_duration,
         last_checkpoint_mtime
-      ) VALUES (
-        @id, @name, @provider, @endpoint, @bucket, @region, @accessKey, @secretKey,
-        @forcePathStyle, @cdnUrl, @localPath, @readOnly, @createdAt, @updatedAt,
-        @lastScannedAt, @scanStatus, @totalFiles, @totalSize, @totalVideoDuration,
-        @lastCheckpointMtime
-      )
-    `);
-    stmt.run({
-      ...source,
-      forcePathStyle: source.forcePathStyle ? 1 : 0,
-      readOnly: source.readOnly ? 1 : 0,
-      accessKey: source.accessKey || '',
-      secretKey: source.secretKey || '',
-      region: source.region || '',
-      cdnUrl: source.cdnUrl || '',
-      lastScannedAt: source.lastScannedAt || null,
-      lastCheckpointMtime: source.lastCheckpointMtime || null,
-    });
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        source.id,
+        source.name,
+        source.provider,
+        source.endpoint,
+        source.bucket,
+        source.region || '',
+        source.accessKey || '',
+        source.secretKey || '',
+        Boolean(source.forcePathStyle),
+        source.cdnUrl || '',
+        source.localPath || '',
+        Boolean(source.readOnly),
+        source.createdAt,
+        source.updatedAt,
+        source.lastScannedAt || null,
+        source.scanStatus,
+        source.totalFiles,
+        source.totalSize,
+        source.totalVideoDuration,
+        source.lastCheckpointMtime || null,
+      ]
+    );
   },
 
-  update(source: StorageSource): void {
-    const stmt = db.prepare(`
-      UPDATE sources SET
-        name = @name,
-        provider = @provider,
-        endpoint = @endpoint,
-        bucket = @bucket,
-        region = @region,
-        access_key = @accessKey,
-        secret_key = @secretKey,
-        force_path_style = @forcePathStyle,
-        cdn_url = @cdnUrl,
-        local_path = @localPath,
-        read_only = @readOnly,
-        updated_at = @updatedAt,
-        last_scanned_at = @lastScannedAt,
-        scan_status = @scanStatus,
-        total_files = @totalFiles,
-        total_size = @totalSize,
-        total_video_duration = @totalVideoDuration,
-        last_checkpoint_mtime = @lastCheckpointMtime
-      WHERE id = @id
-    `);
-    stmt.run({
-      ...source,
-      forcePathStyle: source.forcePathStyle ? 1 : 0,
-      readOnly: source.readOnly ? 1 : 0,
-      accessKey: source.accessKey || '',
-      secretKey: source.secretKey || '',
-      region: source.region || '',
-      cdnUrl: source.cdnUrl || '',
-      lastScannedAt: source.lastScannedAt || null,
-      lastCheckpointMtime: source.lastCheckpointMtime || null,
-    });
+  async update(source: StorageSource): Promise<void> {
+    await query(
+      `UPDATE sources SET
+        name = ?, provider = ?, endpoint = ?, bucket = ?, region = ?, access_key = ?, secret_key = ?,
+        force_path_style = ?, cdn_url = ?, local_path = ?, read_only = ?, updated_at = ?,
+        last_scanned_at = ?, scan_status = ?, total_files = ?, total_size = ?, total_video_duration = ?,
+        last_checkpoint_mtime = ?
+      WHERE id = ?`,
+      [
+        source.name,
+        source.provider,
+        source.endpoint,
+        source.bucket,
+        source.region || '',
+        source.accessKey || '',
+        source.secretKey || '',
+        Boolean(source.forcePathStyle),
+        source.cdnUrl || '',
+        source.localPath || '',
+        Boolean(source.readOnly),
+        source.updatedAt,
+        source.lastScannedAt || null,
+        source.scanStatus,
+        source.totalFiles,
+        source.totalSize,
+        source.totalVideoDuration,
+        source.lastCheckpointMtime || null,
+        source.id,
+      ]
+    );
   },
 
-  updateCheckpoint(id: string, timestamp: number): void {
-    db.prepare('UPDATE sources SET last_checkpoint_mtime = ?, updated_at = ? WHERE id = ?')
-      .run(timestamp, Date.now(), id);
+  /** Record a finished scan without touching settings that may have been edited meanwhile. */
+  async finishScan(
+    id: string,
+    totals: { totalFiles: number; totalSize: number; totalVideoDuration: number; lastScannedAt: number }
+  ): Promise<void> {
+    await query(
+      `UPDATE sources SET scan_status = 'completed', total_files = ?, total_size = ?, total_video_duration = ?,
+        last_scanned_at = ?, updated_at = ?
+      WHERE id = ?`,
+      [totals.totalFiles, totals.totalSize, totals.totalVideoDuration, totals.lastScannedAt, Date.now(), id]
+    );
   },
 
-  updateScanStatus(id: string, status: StorageSource['scanStatus'], lastScannedAt?: number): void {
+  async updateCheckpoint(id: string, timestamp: number): Promise<void> {
+    await query('UPDATE sources SET last_checkpoint_mtime = ?, updated_at = ? WHERE id = ?', [timestamp, Date.now(), id]);
+  },
+
+  async updateScanStatus(id: string, status: StorageSource['scanStatus'], lastScannedAt?: number): Promise<void> {
     if (lastScannedAt) {
-      db.prepare('UPDATE sources SET scan_status = ?, last_scanned_at = ?, updated_at = ? WHERE id = ?')
-        .run(status, lastScannedAt, Date.now(), id);
+      await query('UPDATE sources SET scan_status = ?, last_scanned_at = ?, updated_at = ? WHERE id = ?', [
+        status,
+        lastScannedAt,
+        Date.now(),
+        id,
+      ]);
     } else {
-      db.prepare('UPDATE sources SET scan_status = ?, updated_at = ? WHERE id = ?')
-        .run(status, Date.now(), id);
+      await query('UPDATE sources SET scan_status = ?, updated_at = ? WHERE id = ?', [status, Date.now(), id]);
     }
   },
 
-  delete(id: string): void {
-    db.prepare('DELETE FROM files WHERE source_id = ?').run(id);
-    db.prepare('DELETE FROM download_tasks WHERE source_id = ?').run(id);
-    db.prepare('DELETE FROM scan_history WHERE source_id = ?').run(id);
-    db.prepare('DELETE FROM sources WHERE id = ?').run(id);
+  async delete(id: string): Promise<void> {
+    await transaction(async (client) => {
+      await query('DELETE FROM files WHERE source_id = ?', [id], client);
+      await query('DELETE FROM download_tasks WHERE source_id = ?', [id], client);
+      await query('DELETE FROM scan_history WHERE source_id = ?', [id], client);
+      await query('DELETE FROM sources WHERE id = ?', [id], client);
+    });
   },
 };
 
+const ALLOWED_SORT = ['key', 'size', 'last_modified', 'duration', 'category', 'extension', 'local_status'];
+const sortClause = (sortBy: string, sortOrder?: string): string =>
+  `${ALLOWED_SORT.includes(sortBy) ? sortBy : 'key'} ${sortOrder === 'DESC' ? 'DESC' : 'ASC'}`;
+
 export const fileRepo = {
-  getBySource(
+  async getBySource(
     sourceId: string,
     options: {
       category?: string;
@@ -263,18 +346,8 @@ export const fileRepo = {
       sortOrder?: 'ASC' | 'DESC';
       prefix?: string;
     } = {}
-  ): { files: StorageFile[]; total: number } {
-    const {
-      category,
-      search,
-      startDate,
-      endDate,
-      limit = 100,
-      offset = 0,
-      sortBy = 'key',
-      sortOrder = 'ASC',
-      prefix,
-    } = options;
+  ): Promise<{ files: StorageFile[]; total: number }> {
+    const { category, search, startDate, endDate, limit = 100, offset = 0, sortBy = 'key', sortOrder = 'ASC', prefix } = options;
 
     let whereClause = 'WHERE source_id = ?';
     const params: any[] = [sourceId];
@@ -283,54 +356,62 @@ export const fileRepo = {
       whereClause += ' AND category = ?';
       params.push(category);
     }
-
     if (search) {
-      whereClause += ' AND key LIKE ?';
-      params.push(`%${search}%`);
+      // Case-insensitive, as it was with SQLite's LIKE
+      whereClause += ' AND key ILIKE ?';
+      params.push(`%${likeEscape(search)}%`);
     }
-
     if (prefix) {
       whereClause += ' AND key LIKE ?';
-      params.push(`${prefix}%`);
+      params.push(`${likeEscape(prefix)}%`);
     }
-
     if (startDate !== undefined) {
       whereClause += ' AND last_modified >= ?';
       params.push(startDate);
     }
-
     if (endDate !== undefined) {
       whereClause += ' AND last_modified <= ?';
       params.push(endDate);
     }
 
-    const countRow = db.prepare(`SELECT COUNT(*) as count FROM files ${whereClause}`).get(...params) as any;
-    const total = countRow ? countRow.count : 0;
-
-    // Validate sortBy column to prevent SQL injection
-    const allowedSort = ['key', 'size', 'last_modified', 'duration', 'category', 'extension', 'local_status'];
-    const safeSort = allowedSort.includes(sortBy) ? sortBy : 'key';
-    const safeOrder = sortOrder === 'DESC' ? 'DESC' : 'ASC';
-
-    const rows = db.prepare(`
-      SELECT * FROM files
-      ${whereClause}
-      ORDER BY ${safeSort} ${safeOrder}
-      LIMIT ? OFFSET ?
-    `).all(...params, limit, offset) as any[];
-
-    return {
-      files: rows.map(mapFileRow),
-      total,
-    };
+    const countRow = await queryOne(`SELECT COUNT(*) AS count FROM files ${whereClause}`, params);
+    const rows = await query(
+      `SELECT * FROM files ${whereClause} ORDER BY ${sortClause(sortBy, sortOrder)} LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+    return { files: rows.map(mapFileRow), total: countRow?.count ?? 0 };
   },
 
-  getByKey(sourceId: string, key: string): StorageFile | null {
-    const row = db.prepare('SELECT * FROM files WHERE source_id = ? AND key = ?').get(sourceId, key) as any;
+  async getByKey(sourceId: string, key: string): Promise<StorageFile | null> {
+    const row = await queryOne('SELECT * FROM files WHERE source_id = ? AND key = ?', [sourceId, key]);
     return row ? mapFileRow(row) : null;
   },
 
-  getHierarchy(
+  /** Rows for many keys at once (one scanner page), keyed by file key. */
+  async getByKeys(sourceId: string, keys: string[]): Promise<Map<string, StorageFile>> {
+    if (keys.length === 0) return new Map();
+    const rows = await query('SELECT * FROM files WHERE source_id = ? AND key = ANY(?)', [sourceId, keys]);
+    return new Map(rows.map((row) => [row.key, mapFileRow(row)]));
+  },
+
+  /** Every file to download for a source or folder, without a page limit. */
+  async listForDownload(
+    sourceId: string,
+    options: { prefix?: string; onlyMissing?: boolean; excludeSynced?: boolean } = {}
+  ): Promise<StorageFile[]> {
+    let sql = 'SELECT * FROM files WHERE source_id = ?';
+    const params: any[] = [sourceId];
+    if (options.prefix) {
+      sql += ' AND key LIKE ?';
+      params.push(`${likeEscape(options.prefix)}%`);
+    }
+    if (options.onlyMissing) sql += " AND local_status = 'missing'";
+    if (options.excludeSynced) sql += " AND local_status <> 'synced'";
+    const rows = await query(`${sql} ORDER BY key`, params);
+    return rows.map(mapFileRow);
+  },
+
+  async getHierarchy(
     sourceId: string,
     options: {
       prefix?: string;
@@ -343,7 +424,7 @@ export const fileRepo = {
       sortBy?: string;
       sortOrder?: 'ASC' | 'DESC';
     } = {}
-  ): HierarchyResponse {
+  ): Promise<HierarchyResponse> {
     const rawPrefix = options.prefix || '';
     // Normalize prefix: if empty or '/', normalize to ''; otherwise ensure it ends with '/'
     const prefix = rawPrefix && rawPrefix !== '/' ? (rawPrefix.endsWith('/') ? rawPrefix : rawPrefix + '/') : '';
@@ -368,67 +449,44 @@ export const fileRepo = {
       parentPrefix = parts.length > 0 ? parts.join('/') + '/' : '';
     }
 
-    const len = prefix.length;
-
     // Filter clauses for optional category, search, and date range
-    let catClause = '';
-    const catParams: any[] = [];
+    let filterClause = '';
+    const filterParams: any[] = [];
     if (category && category !== 'all') {
-      catClause = ' AND category = ?';
-      catParams.push(category);
+      filterClause += ' AND category = ?';
+      filterParams.push(category);
     }
-
-    let searchClause = '';
-    const searchParams: any[] = [];
     if (search) {
-      searchClause = ' AND key LIKE ?';
-      searchParams.push(`%${search}%`);
+      filterClause += ' AND key ILIKE ?';
+      filterParams.push(`%${likeEscape(search)}%`);
     }
-
-    let dateClause = '';
-    const dateParams: any[] = [];
     if (startDate !== undefined) {
-      dateClause += ' AND last_modified >= ?';
-      dateParams.push(startDate);
+      filterClause += ' AND last_modified >= ?';
+      filterParams.push(startDate);
     }
     if (endDate !== undefined) {
-      dateClause += ' AND last_modified <= ?';
-      dateParams.push(endDate);
+      filterClause += ' AND last_modified <= ?';
+      filterParams.push(endDate);
     }
 
-    // 1. Folders query
-    let folderSql = '';
-    const folderParams: any[] = [sourceId];
+    // The part of the key below the current folder
+    const rest = `substr(key, ${prefix.length + 1})`;
+    const scope = prefix ? 'source_id = ? AND key LIKE ?' : 'source_id = ?';
+    const scopeParams = prefix ? [sourceId, `${likeEscape(prefix)}%`] : [sourceId];
 
-    if (!prefix) {
-      folderSql = `
-        SELECT
-          SUBSTR(key, 1, INSTR(key, '/') - 1) AS folder_name,
-          COUNT(*) as file_count,
-          SUM(size) as total_size,
-          SUM(duration) as video_duration
-        FROM files
-        WHERE source_id = ? AND INSTR(key, '/') > 0 ${catClause} ${searchClause} ${dateClause}
-        GROUP BY folder_name
-        ORDER BY folder_name ASC
-      `;
-    } else {
-      folderSql = `
-        SELECT
-          SUBSTR(SUBSTR(key, ${len + 1}), 1, INSTR(SUBSTR(key, ${len + 1}), '/') - 1) AS folder_name,
-          COUNT(*) as file_count,
-          SUM(size) as total_size,
-          SUM(duration) as video_duration
-        FROM files
-        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') > 0 ${catClause} ${searchClause} ${dateClause}
-        GROUP BY folder_name
-        ORDER BY folder_name ASC
-      `;
-      folderParams.push(`${prefix}%`);
-    }
-
-    folderParams.push(...catParams, ...searchParams, ...dateParams);
-    const folderRows = db.prepare(folderSql).all(...folderParams) as any[];
+    // 1. Immediate subfolders
+    const folderRows = await query(
+      `SELECT
+         substr(${rest}, 1, strpos(${rest}, '/') - 1) AS folder_name,
+         COUNT(*) AS file_count,
+         SUM(size) AS total_size,
+         SUM(duration) AS video_duration
+       FROM files
+       WHERE ${scope} AND strpos(${rest}, '/') > 0 ${filterClause}
+       GROUP BY folder_name
+       ORDER BY folder_name ASC`,
+      [...scopeParams, ...filterParams]
+    );
 
     const folders: HierarchyFolder[] = folderRows
       .filter((r) => r.folder_name)
@@ -440,40 +498,13 @@ export const fileRepo = {
         videoDuration: Number(r.video_duration || 0),
       }));
 
-    // 2. Immediate files query
-    let fileSql = '';
-    let countSql = '';
-    const fileParams: any[] = [sourceId];
-
-    const allowedSort = ['key', 'size', 'last_modified', 'duration', 'category', 'extension', 'local_status'];
-    const safeSort = allowedSort.includes(sortBy) ? sortBy : 'key';
-    const safeOrder = sortOrder === 'DESC' ? 'DESC' : 'ASC';
-
-    if (!prefix) {
-      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause} ${dateClause}`;
-      fileSql = `
-        SELECT * FROM files
-        WHERE source_id = ? AND INSTR(key, '/') = 0 ${catClause} ${searchClause} ${dateClause}
-        ORDER BY ${safeSort} ${safeOrder}
-        LIMIT ? OFFSET ?
-      `;
-    } else {
-      countSql = `SELECT COUNT(*) as count FROM files WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause} ${dateClause}`;
-      fileSql = `
-        SELECT * FROM files
-        WHERE source_id = ? AND key LIKE ? AND INSTR(SUBSTR(key, ${len + 1}), '/') = 0 ${catClause} ${searchClause} ${dateClause}
-        ORDER BY ${safeSort} ${safeOrder}
-        LIMIT ? OFFSET ?
-      `;
-      fileParams.push(`${prefix}%`);
-    }
-
-    const countParams = [...fileParams, ...catParams, ...searchParams, ...dateParams];
-    const totalFilesRow = db.prepare(countSql).get(...countParams) as any;
-    const totalFiles = totalFilesRow ? totalFilesRow.count : 0;
-
-    const queryParams = [...fileParams, ...catParams, ...searchParams, ...dateParams, limit, offset];
-    const fileRows = db.prepare(fileSql).all(...queryParams) as any[];
+    // 2. Files directly in this folder
+    const fileWhere = `WHERE ${scope} AND strpos(${rest}, '/') = 0 ${filterClause}`;
+    const totalFilesRow = await queryOne(`SELECT COUNT(*) AS count FROM files ${fileWhere}`, [...scopeParams, ...filterParams]);
+    const fileRows = await query(
+      `SELECT * FROM files ${fileWhere} ORDER BY ${sortClause(sortBy, sortOrder)} LIMIT ? OFFSET ?`,
+      [...scopeParams, ...filterParams, limit, offset]
+    );
     const files: StorageFile[] = fileRows.map(mapFileRow);
 
     const totalSize = folders.reduce((acc, f) => acc + f.totalSize, 0) + files.reduce((acc, f) => acc + f.size, 0);
@@ -485,24 +516,48 @@ export const fileRepo = {
       folders,
       files,
       totalFolders: folders.length,
-      totalFiles,
+      totalFiles: totalFilesRow?.count ?? 0,
       totalSize,
     };
   },
 
-  upsertBatch(files: StorageFile[]): void {
+  async upsertBatch(files: StorageFile[]): Promise<void> {
     if (files.length === 0) return;
-    const insertStmt = db.prepare(`
-      INSERT INTO files (
-        id, source_id, key, size, etag, last_modified, content_type,
-        extension, category, duration, width, height, codec, bitrate,
-        local_status, local_size, local_mtime, local_file_path, scanned_at
-      ) VALUES (
-        @id, @sourceId, @key, @size, @etag, @lastModified, @contentType,
-        @extension, @category, @duration, @width, @height, @codec, @bitrate,
-        @localStatus, @localSize, @localMtime, @localFilePath, @scannedAt
-      )
-      ON CONFLICT(id) DO UPDATE SET
+    // A statement can't update the same row twice, so keep the last entry per id
+    const unique = [...new Map(files.map((f) => [f.id, f])).values()];
+    const columns = [
+      'id', 'source_id', 'key', 'size', 'etag', 'last_modified', 'content_type',
+      'extension', 'category', 'duration', 'width', 'height', 'codec', 'bitrate',
+      'local_status', 'local_size', 'local_mtime', 'local_file_path', 'scanned_at',
+    ];
+    const rows = unique.map((item) => [
+      item.id,
+      item.sourceId,
+      item.key,
+      item.size,
+      item.etag ?? null,
+      item.lastModified,
+      item.contentType,
+      item.extension,
+      item.category,
+      item.duration || 0,
+      item.width ?? null,
+      item.height ?? null,
+      item.codec ?? null,
+      item.bitrate ?? null,
+      item.localStatus,
+      item.localSize ?? null,
+      item.localMtime ?? null,
+      item.localFilePath ?? null,
+      item.scannedAt,
+    ]);
+    // Never blank out media info: a quick scan sends no duration, a deep scan only for new/changed files
+    await insertRows(
+      pool,
+      'files',
+      columns,
+      rows,
+      `ON CONFLICT (id) DO UPDATE SET
         size = excluded.size,
         etag = excluded.etag,
         last_modified = excluded.last_modified,
@@ -510,51 +565,38 @@ export const fileRepo = {
         extension = excluded.extension,
         category = excluded.category,
         duration = CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE files.duration END,
-        width = CASE WHEN excluded.width IS NOT NULL THEN excluded.width ELSE files.width END,
-        height = CASE WHEN excluded.height IS NOT NULL THEN excluded.height ELSE files.height END,
-        codec = CASE WHEN excluded.codec IS NOT NULL THEN excluded.codec ELSE files.codec END,
-        bitrate = CASE WHEN excluded.bitrate IS NOT NULL THEN excluded.bitrate ELSE files.bitrate END,
+        width = COALESCE(excluded.width, files.width),
+        height = COALESCE(excluded.height, files.height),
+        codec = COALESCE(excluded.codec, files.codec),
+        bitrate = COALESCE(excluded.bitrate, files.bitrate),
         local_status = excluded.local_status,
         local_size = excluded.local_size,
         local_mtime = excluded.local_mtime,
         local_file_path = excluded.local_file_path,
-        scanned_at = excluded.scanned_at
-    `);
-
-    const transaction = db.transaction((items: StorageFile[]) => {
-      for (const item of items) {
-        insertStmt.run({
-          ...item,
-          duration: item.duration || 0,
-          width: item.width ?? null,
-          height: item.height ?? null,
-          codec: item.codec ?? null,
-          bitrate: item.bitrate ?? null,
-          localSize: item.localSize ?? null,
-          localMtime: item.localMtime ?? null,
-          localFilePath: item.localFilePath ?? null,
-        });
-      }
-    });
-
-    transaction(files);
+        scanned_at = excluded.scanned_at`
+    );
   },
 
-  updateLocalStatus(
+  async updateLocalStatus(
     id: string,
     status: StorageFile['localStatus'],
     size?: number,
     mtime?: number,
     filePath?: string
-  ): void {
-    db.prepare('UPDATE files SET local_status = ?, local_size = ?, local_mtime = ?, local_file_path = ? WHERE id = ?')
-      .run(status, size ?? null, mtime ?? null, filePath ?? null, id);
+  ): Promise<void> {
+    await query('UPDATE files SET local_status = ?, local_size = ?, local_mtime = ?, local_file_path = ? WHERE id = ?', [
+      status,
+      size ?? null,
+      mtime ?? null,
+      filePath ?? null,
+      id,
+    ]);
   },
 
-  getByDateRange(
+  async getByDateRange(
     sourceId: string,
     options: { startDate?: number; endDate?: number; onlyMissing?: boolean } = {}
-  ): StorageFile[] {
+  ): Promise<StorageFile[]> {
     let sql = 'SELECT * FROM files WHERE source_id = ?';
     const params: any[] = [sourceId];
     if (options.startDate !== undefined) {
@@ -569,63 +611,67 @@ export const fileRepo = {
       sql += " AND local_status = 'missing'";
     }
     sql += ' ORDER BY last_modified ASC';
-    const rows = db.prepare(sql).all(...params) as any[];
+    const rows = await query(sql, params);
     return rows.map(mapFileRow);
-  },
-
-  deleteMissingFiles(sourceId: string, currentKeys: string[]): void {
-    // If scanning a full bucket, remove files no longer present
-    if (currentKeys.length === 0) return;
-    const placeholders = currentKeys.map(() => '?').join(',');
-    db.prepare(`DELETE FROM files WHERE source_id = ? AND key NOT IN (${placeholders})`).run(sourceId, ...currentKeys);
   },
 };
 
+const TASK_COLUMNS = [
+  'id', 'batch_id', 'source_id', 'file_key', 'destination_path', 'size', 'bytes_downloaded',
+  'speed_bps', 'status', 'error', 'created_at', 'updated_at', 'completed_at',
+];
+
 export const downloadRepo = {
-  createBatch(batch: DownloadBatch): void {
-    db.prepare(`
-      INSERT INTO download_batches (
+  async createBatch(batch: DownloadBatch): Promise<void> {
+    await query(
+      `INSERT INTO download_batches (
         id, source_id, source_name, type, start_date, end_date, files_count,
         total_size, bytes_downloaded, status, checkpoint_applied, checkpoint_timestamp,
         created_at, completed_at
-      ) VALUES (
-        @id, @sourceId, @sourceName, @type, @startDate, @endDate, @filesCount,
-        @totalSize, @bytesDownloaded, @status, @checkpointApplied, @checkpointTimestamp,
-        @createdAt, @completedAt
-      )
-    `).run({
-      ...batch,
-      startDate: batch.startDate || null,
-      endDate: batch.endDate || null,
-      checkpointApplied: batch.checkpointApplied ? 1 : 0,
-      checkpointTimestamp: batch.checkpointTimestamp || null,
-      completedAt: batch.completedAt || null,
-    });
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        batch.id,
+        batch.sourceId,
+        batch.sourceName,
+        batch.type,
+        batch.startDate || null,
+        batch.endDate || null,
+        batch.filesCount,
+        batch.totalSize,
+        batch.bytesDownloaded,
+        batch.status,
+        Boolean(batch.checkpointApplied),
+        batch.checkpointTimestamp || null,
+        batch.createdAt,
+        batch.completedAt || null,
+      ]
+    );
   },
 
-  updateBatch(id: string, updates: Partial<DownloadBatch>): void {
+  async updateBatch(id: string, updates: Partial<DownloadBatch>): Promise<void> {
     const fields: string[] = [];
-    const params: any = { id };
-    if (updates.status !== undefined) { fields.push('status = @status'); params.status = updates.status; }
-    if (updates.bytesDownloaded !== undefined) { fields.push('bytes_downloaded = @bytesDownloaded'); params.bytesDownloaded = updates.bytesDownloaded; }
-    if (updates.completedAt !== undefined) { fields.push('completed_at = @completedAt'); params.completedAt = updates.completedAt; }
+    const params: any[] = [];
+    if (updates.status !== undefined) { fields.push('status = ?'); params.push(updates.status); }
+    if (updates.bytesDownloaded !== undefined) { fields.push('bytes_downloaded = ?'); params.push(updates.bytesDownloaded); }
+    if (updates.completedAt !== undefined) { fields.push('completed_at = ?'); params.push(updates.completedAt); }
     if (fields.length > 0) {
-      db.prepare(`UPDATE download_batches SET ${fields.join(', ')} WHERE id = @id`).run(params);
+      await query(`UPDATE download_batches SET ${fields.join(', ')} WHERE id = ?`, [...params, id]);
     }
   },
 
-  updateBatchProgress(batchId: string): void {
-    const stats = db.prepare(`
-      SELECT
-        COUNT(*) as total,
-        SUM(size) as total_size,
-        SUM(bytes_downloaded) as downloaded,
-        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
-        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
-        SUM(CASE WHEN status = 'downloading' THEN 1 ELSE 0 END) as downloading_count
+  async updateBatchProgress(batchId: string): Promise<void> {
+    const stats = await queryOne(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(size) AS total_size,
+        SUM(bytes_downloaded) AS downloaded,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+        SUM(CASE WHEN status = 'downloading' THEN 1 ELSE 0 END) AS downloading_count
       FROM download_tasks
-      WHERE batch_id = ?
-    `).get(batchId) as any;
+      WHERE batch_id = ?`,
+      [batchId]
+    );
 
     if (!stats || stats.total === 0) return;
 
@@ -644,14 +690,15 @@ export const downloadRepo = {
       }
     }
 
-    db.prepare(`
-      UPDATE download_batches
+    await query(
+      `UPDATE download_batches
       SET bytes_downloaded = ?, status = ?, completed_at = COALESCE(completed_at, ?)
-      WHERE id = ?
-    `).run(stats.downloaded || 0, status, completedAt, batchId);
+      WHERE id = ?`,
+      [stats.downloaded || 0, status, completedAt, batchId]
+    );
   },
 
-  getBatches(sourceId?: string, limit: number = 50): DownloadBatch[] {
+  async getBatches(sourceId?: string, limit: number = 50): Promise<DownloadBatch[]> {
     let sql = 'SELECT * FROM download_batches';
     const params: any[] = [];
     if (sourceId) {
@@ -660,89 +707,102 @@ export const downloadRepo = {
     }
     sql += ' ORDER BY created_at DESC LIMIT ?';
     params.push(limit);
-    const rows = db.prepare(sql).all(...params) as any[];
+    const rows = await query(sql, params);
     return rows.map(mapBatchRow);
   },
 
-  getBatchById(id: string): DownloadBatch | null {
-    const row = db.prepare('SELECT * FROM download_batches WHERE id = ?').get(id) as any;
+  async getBatchById(id: string): Promise<DownloadBatch | null> {
+    const row = await queryOne('SELECT * FROM download_batches WHERE id = ?', [id]);
     return row ? mapBatchRow(row) : null;
   },
 
-  getBatchTasks(batchId: string): DownloadTask[] {
-    const rows = db.prepare('SELECT * FROM download_tasks WHERE batch_id = ? ORDER BY created_at ASC').all(batchId) as any[];
+  async getBatchTasks(batchId: string): Promise<DownloadTask[]> {
+    const rows = await query('SELECT * FROM download_tasks WHERE batch_id = ? ORDER BY created_at ASC', [batchId]);
     return rows.map(mapDownloadRow);
   },
 
-  create(task: DownloadTask): void {
-    db.prepare(`
-      INSERT INTO download_tasks (
-        id, batch_id, source_id, file_key, destination_path, size, bytes_downloaded,
-        speed_bps, status, error, created_at, updated_at, completed_at
-      ) VALUES (
-        @id, @batchId, @sourceId, @fileKey, @destinationPath, @size, @bytesDownloaded,
-        @speedBps, @status, @error, @createdAt, @updatedAt, @completedAt
-      )
-    `).run({
-      ...task,
-      batchId: task.batchId || null,
-      error: task.error || null,
-      completedAt: task.completedAt || null,
-    });
+  async create(task: DownloadTask): Promise<void> {
+    await this.createMany([task]);
   },
 
-  updateProgress(id: string, bytesDownloaded: number, speedBps: number, status?: DownloadTask['status']): void {
+  async createMany(tasks: DownloadTask[]): Promise<void> {
+    if (tasks.length === 0) return;
+    const rows = tasks.map((task) => [
+      task.id,
+      task.batchId || null,
+      task.sourceId,
+      task.fileKey,
+      task.destinationPath,
+      task.size,
+      task.bytesDownloaded,
+      task.speedBps,
+      task.status,
+      task.error || null,
+      task.createdAt,
+      task.updatedAt,
+      task.completedAt || null,
+    ]);
+    await transaction((client) => insertRows(client, 'download_tasks', TASK_COLUMNS, rows));
+  },
+
+  async updateProgress(id: string, bytesDownloaded: number, speedBps: number, status?: DownloadTask['status']): Promise<void> {
     if (status) {
-      db.prepare(`
-        UPDATE download_tasks
-        SET bytes_downloaded = ?, speed_bps = ?, status = ?, updated_at = ?
-        WHERE id = ?
-      `).run(bytesDownloaded, speedBps, status, Date.now(), id);
+      await query('UPDATE download_tasks SET bytes_downloaded = ?, speed_bps = ?, status = ?, updated_at = ? WHERE id = ?', [
+        bytesDownloaded,
+        speedBps,
+        status,
+        Date.now(),
+        id,
+      ]);
     } else {
-      db.prepare(`
-        UPDATE download_tasks
-        SET bytes_downloaded = ?, speed_bps = ?, updated_at = ?
-        WHERE id = ?
-      `).run(bytesDownloaded, speedBps, Date.now(), id);
+      // Progress updates are sent without waiting; never let a late one touch a finished task
+      await query(
+        "UPDATE download_tasks SET bytes_downloaded = ?, speed_bps = ?, updated_at = ? WHERE id = ? AND status = 'downloading'",
+        [bytesDownloaded, speedBps, Date.now(), id]
+      );
     }
   },
 
-  finish(id: string, status: 'completed' | 'failed', error?: string): void {
-    const task = db.prepare('SELECT batch_id FROM download_tasks WHERE id = ?').get(id) as any;
-    db.prepare(`
-      UPDATE download_tasks
+  async finish(id: string, status: 'completed' | 'failed', error?: string): Promise<void> {
+    const task = await queryOne(
+      `UPDATE download_tasks
       SET status = ?, error = ?, speed_bps = 0, updated_at = ?, completed_at = ?
       WHERE id = ?
-    `).run(status, error || null, Date.now(), Date.now(), id);
-
-    if (task && task.batch_id) {
-      this.updateBatchProgress(task.batch_id);
+      RETURNING batch_id`,
+      [status, error || null, Date.now(), Date.now(), id]
+    );
+    if (task?.batch_id) {
+      await this.updateBatchProgress(task.batch_id);
     }
   },
 
-  getAll(): DownloadTask[] {
-    const rows = db.prepare('SELECT * FROM download_tasks ORDER BY created_at DESC LIMIT 100').all() as any[];
+  async getAll(): Promise<DownloadTask[]> {
+    const rows = await query('SELECT * FROM download_tasks ORDER BY created_at DESC LIMIT 100');
     return rows.map(mapDownloadRow);
   },
 
-  getBySource(sourceId: string): DownloadTask[] {
-    const rows = db.prepare('SELECT * FROM download_tasks WHERE source_id = ? ORDER BY created_at DESC LIMIT 50').all(sourceId) as any[];
+  async getBySource(sourceId: string): Promise<DownloadTask[]> {
+    const rows = await query('SELECT * FROM download_tasks WHERE source_id = ? ORDER BY created_at DESC LIMIT 50', [sourceId]);
     return rows.map(mapDownloadRow);
   },
 
-  getHistory(options: { sourceId?: string; search?: string; status?: string; limit?: number; offset?: number } = {}): { tasks: DownloadTask[]; total: number } {
+  async getHistory(
+    options: { sourceId?: string; search?: string; status?: string; limit?: number; offset?: number } = {}
+  ): Promise<{ tasks: DownloadTask[]; total: number }> {
     const { sourceId, search, status, limit = 50, offset = 0 } = options;
     let where = 'WHERE 1=1';
     const params: any[] = [];
     if (sourceId) { where += ' AND source_id = ?'; params.push(sourceId); }
     if (status) { where += ' AND status = ?'; params.push(status); }
-    if (search) { where += ' AND file_key LIKE ?'; params.push(`%${search}%`); }
+    if (search) { where += ' AND file_key ILIKE ?'; params.push(`%${likeEscape(search)}%`); }
 
-    const countRow = db.prepare(`SELECT COUNT(*) as count FROM download_tasks ${where}`).get(...params) as any;
-    const total = countRow ? countRow.count : 0;
-
-    const rows = db.prepare(`SELECT * FROM download_tasks ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as any[];
-    return { tasks: rows.map(mapDownloadRow), total };
+    const countRow = await queryOne(`SELECT COUNT(*) AS count FROM download_tasks ${where}`, params);
+    const rows = await query(`SELECT * FROM download_tasks ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [
+      ...params,
+      limit,
+      offset,
+    ]);
+    return { tasks: rows.map(mapDownloadRow), total: countRow?.count ?? 0 };
   },
 };
 
@@ -771,7 +831,7 @@ function mapSourceRow(row: any): StorageSource {
   };
 }
 
-function mapFileRow(row: any): StorageFile {
+export function mapFileRow(row: any): StorageFile {
   return {
     id: row.id,
     sourceId: row.source_id,

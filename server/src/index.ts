@@ -5,8 +5,10 @@ import cors from 'cors';
 import path from 'node:path';
 import fs from 'node:fs';
 import mime from 'mime-types';
-import { db, sourceRepo, fileRepo, downloadRepo } from './db.js';
+import { initDatabase, sourceRepo, fileRepo, downloadRepo, DATABASE_URL, redactUrl } from './db.js';
+import { importSqliteIfNeeded } from './sqliteImport.js';
 import { storageService } from './services/storageService.js';
+import { buildHtmlReport, writeCsvReport, csvReportFilename } from './services/reportService.js';
 import { scannerService } from './services/scannerService.js';
 import { metricsService } from './services/metricsService.js';
 import { downloadService } from './services/downloadService.js';
@@ -105,10 +107,10 @@ function parseDirectoryPath(value: unknown, field: string): string | undefined {
  * Locate an already-downloaded copy of a file: the source's default directory first,
  * then the path recorded when it was downloaded to a custom location.
  */
-function findLocalCopy(source: StorageSource, key: string): string | undefined {
+async function findLocalCopy(source: StorageSource, key: string): Promise<string | undefined> {
   const candidates = [
     source.localPath ? path.join(source.localPath, key) : undefined,
-    fileRepo.getByKey(source.id, key)?.localFilePath,
+    (await fileRepo.getByKey(source.id, key))?.localFilePath,
   ];
   return candidates.find((p): p is string => Boolean(p) && fs.existsSync(p!));
 }
@@ -116,18 +118,18 @@ function findLocalCopy(source: StorageSource, key: string): string | undefined {
 // ---------------- API ROUTES ----------------
 
 // 1. Sources CRUD
-app.get('/api/sources', (_req: Request, res: Response) => {
+app.get('/api/sources', async (_req: Request, res: Response) => {
   try {
-    const sources = sourceRepo.getAll();
+    const sources = await sourceRepo.getAll();
     res.json(sources);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/sources/:id', (req: Request, res: Response) => {
+app.get('/api/sources/:id', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(paramId(req));
+    const source = await sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
     res.json(source);
   } catch (err: any) {
@@ -135,7 +137,7 @@ app.get('/api/sources/:id', (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/sources', (req: Request, res: Response) => {
+app.post('/api/sources', async (req: Request, res: Response) => {
   try {
     const data = req.body;
     if (!data.name || !data.bucket || !data.provider) {
@@ -168,16 +170,16 @@ app.post('/api/sources', (req: Request, res: Response) => {
       totalVideoDuration: 0,
     };
 
-    sourceRepo.insert(newSource);
+    await sourceRepo.insert(newSource);
     res.status(201).json(newSource);
   } catch (err: any) {
     sendError(res, err);
   }
 });
 
-app.put('/api/sources/:id', (req: Request, res: Response) => {
+app.put('/api/sources/:id', async (req: Request, res: Response) => {
   try {
-    const existing = sourceRepo.getById(paramId(req));
+    const existing = await sourceRepo.getById(paramId(req));
     if (!existing) return res.status(404).json({ error: 'Source not found' });
 
     const data = req.body;
@@ -202,16 +204,16 @@ app.put('/api/sources/:id', (req: Request, res: Response) => {
       try { fs.mkdirSync(updated.localPath, { recursive: true }); } catch {}
     }
 
-    sourceRepo.update(updated);
+    await sourceRepo.update(updated);
     res.json(updated);
   } catch (err: any) {
     sendError(res, err);
   }
 });
 
-app.delete('/api/sources/:id', (req: Request, res: Response) => {
+app.delete('/api/sources/:id', async (req: Request, res: Response) => {
   try {
-    sourceRepo.delete(paramId(req));
+    await sourceRepo.delete(paramId(req));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -251,7 +253,7 @@ app.post('/api/sources/test', async (req: Request, res: Response) => {
 // 2. Scanner Trigger & Metrics
 app.post('/api/sources/:id/scan', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(paramId(req));
+    const source = await sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
 
     if (scannerService.isScanning(source.id)) {
@@ -271,9 +273,9 @@ app.post('/api/sources/:id/scan', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/sources/:id/metrics', (req: Request, res: Response) => {
+app.get('/api/sources/:id/metrics', async (req: Request, res: Response) => {
   try {
-    const metrics = metricsService.computeMetrics(paramId(req));
+    const metrics = await metricsService.computeMetrics(paramId(req));
     if (!metrics) return res.status(404).json({ error: 'Source not found' });
     res.json(metrics);
   } catch (err: any) {
@@ -281,14 +283,37 @@ app.get('/api/sources/:id/metrics', (req: Request, res: Response) => {
   }
 });
 
+// 2.1 Export stats: printable HTML report or per-file CSV
+app.get('/api/sources/:id/report', async (req: Request, res: Response) => {
+  try {
+    const id = paramId(req);
+    const format = req.query.format === 'csv' ? 'csv' : 'html';
+    if (format === 'csv') {
+      const filename = await csvReportFilename(id);
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      await writeCsvReport(id, res);
+      return res.end();
+    }
+    const { filename, html } = await buildHtmlReport(id);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(html);
+  } catch (err: any) {
+    // Mid-way through a CSV the headers are already sent: cut the download off instead
+    if (res.headersSent) return res.destroy(err);
+    sendError(res, err);
+  }
+});
+
 // 3. Files Browser & Search
-app.get('/api/sources/:id/files', (req: Request, res: Response) => {
+app.get('/api/sources/:id/files', async (req: Request, res: Response) => {
   try {
     const { category, search, limit, offset, sortBy, sortOrder, prefix } = req.query;
     const startDate = req.query.startDate ? parseInt(req.query.startDate as string, 10) : undefined;
     const endDate = req.query.endDate ? parseInt(req.query.endDate as string, 10) : undefined;
 
-    const result = fileRepo.getBySource(paramId(req), {
+    const result = await fileRepo.getBySource(paramId(req), {
       category: category as string,
       search: search as string,
       startDate,
@@ -306,7 +331,7 @@ app.get('/api/sources/:id/files', (req: Request, res: Response) => {
 });
 
 // 3.1 Hierarchical On-Demand Directory Explorer (Click-to-load folder navigation)
-app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
+app.get('/api/sources/:id/hierarchy', async (req: Request, res: Response) => {
   try {
     const id = paramId(req);
     const prefix = (req.query.prefix as string) || '';
@@ -319,12 +344,12 @@ app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
     const sortBy = (req.query.sortBy as string) || 'key';
     const sortOrder = (req.query.sortOrder as 'ASC' | 'DESC') || 'ASC';
 
-    const source = sourceRepo.getById(id);
+    const source = await sourceRepo.getById(id);
     if (!source) {
       return res.status(404).json({ error: 'Source not found' });
     }
 
-    const hierarchy = fileRepo.getHierarchy(id, {
+    const hierarchy = await fileRepo.getHierarchy(id, {
       prefix,
       category,
       search,
@@ -343,17 +368,17 @@ app.get('/api/sources/:id/hierarchy', (req: Request, res: Response) => {
 });
 
 // 3.2 Download entire folder with preserved folder structure
-app.post('/api/sources/:id/download-folder', (req: Request, res: Response) => {
+app.post('/api/sources/:id/download-folder', async (req: Request, res: Response) => {
   try {
     const id = paramId(req);
     const { folderPrefix = '', onlyMissing = true, destinationDir } = req.body;
 
-    const source = sourceRepo.getById(id);
+    const source = await sourceRepo.getById(id);
     if (!source) {
       return res.status(404).json({ error: 'Source not found' });
     }
 
-    const { batch, tasks } = downloadService.enqueueFolder(
+    const { batch, tasks } = await downloadService.enqueueFolder(
       id,
       folderPrefix,
       Boolean(onlyMissing),
@@ -368,14 +393,14 @@ app.post('/api/sources/:id/download-folder', (req: Request, res: Response) => {
 // 4. File Streaming & Range Proxy (Supports seamless Video/Audio seeking & Image preview)
 app.get('/api/sources/:id/stream', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(paramId(req));
+    const source = await sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).send('Source not found');
 
     const key = req.query.key as string;
     if (!key) return res.status(400).send('File key is required');
 
     // Check if file is already on local on-premise disk
-    const localFilePath = findLocalCopy(source, key);
+    const localFilePath = await findLocalCopy(source, key);
     if (localFilePath) {
       return res.sendFile(path.resolve(localFilePath));
     }
@@ -414,14 +439,14 @@ app.get('/api/sources/:id/stream', async (req: Request, res: Response) => {
 // 5. Raw Text / Code Content for preview
 app.get('/api/sources/:id/raw', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(paramId(req));
+    const source = await sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).send('Source not found');
 
     const key = req.query.key as string;
     if (!key) return res.status(400).send('Key required');
 
     // If local exists, read local
-    const localFilePath = findLocalCopy(source, key);
+    const localFilePath = await findLocalCopy(source, key);
     if (localFilePath) {
       const content = fs.readFileSync(localFilePath, 'utf8');
       return res.json({ content });
@@ -438,7 +463,7 @@ app.get('/api/sources/:id/raw', async (req: Request, res: Response) => {
 // 6. Direct / Presigned URL
 app.get('/api/sources/:id/preview-url', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(paramId(req));
+    const source = await sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
 
     const key = req.query.key as string;
@@ -457,26 +482,26 @@ app.get('/api/sources/:id/preview-url', async (req: Request, res: Response) => {
 });
 
 // 7. Download Endpoints
-app.get('/api/downloads', (_req: Request, res: Response) => {
+app.get('/api/downloads', async (_req: Request, res: Response) => {
   try {
-    const tasks = downloadRepo.getAll();
+    const tasks = await downloadRepo.getAll();
     res.json(tasks);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/downloads', (req: Request, res: Response) => {
+app.post('/api/downloads', async (req: Request, res: Response) => {
   try {
     const { sourceId, keys, key } = req.body;
     if (!sourceId) return res.status(400).json({ error: 'sourceId required' });
     const destinationDir = parseDirectoryPath(req.body.destinationDir, 'destinationDir');
 
     if (Array.isArray(keys) && keys.length > 0) {
-      const result = downloadService.enqueueBatch(sourceId, keys, destinationDir);
+      const result = await downloadService.enqueueBatch(sourceId, keys, destinationDir);
       return res.json(result);
     } else if (key) {
-      const task = downloadService.enqueue(sourceId, key, destinationDir);
+      const task = await downloadService.enqueue(sourceId, key, destinationDir);
       return res.json({ task });
     }
 
@@ -486,12 +511,12 @@ app.post('/api/downloads', (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/downloads/missing', (req: Request, res: Response) => {
+app.post('/api/downloads/missing', async (req: Request, res: Response) => {
   try {
     const { sourceId, destinationDir } = req.body;
     if (!sourceId) return res.status(400).json({ error: 'sourceId required' });
 
-    const result = downloadService.enqueueAllMissing(
+    const result = await downloadService.enqueueAllMissing(
       sourceId,
       parseDirectoryPath(destinationDir, 'destinationDir')
     );
@@ -502,7 +527,7 @@ app.post('/api/downloads/missing', (req: Request, res: Response) => {
 });
 
 // System Helper: Suggest clean default on-premise download path per source
-app.get('/api/system/default-download-path', (req: Request, res: Response) => {
+app.get('/api/system/default-download-path', async (req: Request, res: Response) => {
   try {
     const sourceName = (req.query.sourceName as string) || 'source';
     const sanitized = sourceName.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -514,9 +539,9 @@ app.get('/api/system/default-download-path', (req: Request, res: Response) => {
 });
 
 // Checkpoint & Date Range Downloads
-app.get('/api/sources/:id/checkpoint', (req: Request, res: Response) => {
+app.get('/api/sources/:id/checkpoint', async (req: Request, res: Response) => {
   try {
-    const source = sourceRepo.getById(paramId(req));
+    const source = await sourceRepo.getById(paramId(req));
     if (!source) return res.status(404).json({ error: 'Source not found' });
     res.json({
       lastCheckpointMtime: source.lastCheckpointMtime || null,
@@ -527,20 +552,20 @@ app.get('/api/sources/:id/checkpoint', (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/sources/:id/checkpoint', (req: Request, res: Response) => {
+app.post('/api/sources/:id/checkpoint', async (req: Request, res: Response) => {
   try {
     const { timestamp } = req.body;
-    sourceRepo.updateCheckpoint(paramId(req), timestamp ? Number(timestamp) : 0);
+    await sourceRepo.updateCheckpoint(paramId(req), timestamp ? Number(timestamp) : 0);
     res.json({ success: true, timestamp });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/sources/:id/date-range-preview', (req: Request, res: Response) => {
+app.get('/api/sources/:id/date-range-preview', async (req: Request, res: Response) => {
   try {
     const { startDate, endDate, onlyMissing } = req.query;
-    const files = fileRepo.getByDateRange(paramId(req), {
+    const files = await fileRepo.getByDateRange(paramId(req), {
       startDate: startDate ? parseInt(startDate as string, 10) : undefined,
       endDate: endDate ? parseInt(endDate as string, 10) : undefined,
       onlyMissing: onlyMissing === 'true' || onlyMissing === '1',
@@ -556,10 +581,10 @@ app.get('/api/sources/:id/date-range-preview', (req: Request, res: Response) => 
   }
 });
 
-app.post('/api/sources/:id/download-range', (req: Request, res: Response) => {
+app.post('/api/sources/:id/download-range', async (req: Request, res: Response) => {
   try {
     const { startDate, endDate, onlyMissing, updateCheckpoint, destinationDir } = req.body;
-    const result = downloadService.enqueueDateRange({
+    const result = await downloadService.enqueueDateRange({
       sourceId: paramId(req),
       startDate: startDate ? Number(startDate) : undefined,
       endDate: endDate ? Number(endDate) : undefined,
@@ -574,10 +599,10 @@ app.post('/api/sources/:id/download-range', (req: Request, res: Response) => {
 });
 
 // Download Action History (Batches & Tasks)
-app.get('/api/history/batches', (req: Request, res: Response) => {
+app.get('/api/history/batches', async (req: Request, res: Response) => {
   try {
     const { sourceId, limit } = req.query;
-    const batches = downloadRepo.getBatches(
+    const batches = await downloadRepo.getBatches(
       sourceId as string,
       limit ? parseInt(limit as string, 10) : 50
     );
@@ -587,21 +612,21 @@ app.get('/api/history/batches', (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/history/batches/:id', (req: Request, res: Response) => {
+app.get('/api/history/batches/:id', async (req: Request, res: Response) => {
   try {
-    const batch = downloadRepo.getBatchById(paramId(req));
+    const batch = await downloadRepo.getBatchById(paramId(req));
     if (!batch) return res.status(404).json({ error: 'Batch not found' });
-    const tasks = downloadRepo.getBatchTasks(paramId(req));
+    const tasks = await downloadRepo.getBatchTasks(paramId(req));
     res.json({ batch, tasks });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/history/tasks', (req: Request, res: Response) => {
+app.get('/api/history/tasks', async (req: Request, res: Response) => {
   try {
     const { sourceId, search, status, limit, offset } = req.query;
-    const result = downloadRepo.getHistory({
+    const result = await downloadRepo.getHistory({
       sourceId: sourceId as string,
       search: search as string,
       status: status as string,
@@ -614,9 +639,9 @@ app.get('/api/history/tasks', (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/downloads/:id/cancel', (req: Request, res: Response) => {
+app.post('/api/downloads/:id/cancel', async (req: Request, res: Response) => {
   try {
-    const success = downloadService.cancel(paramId(req));
+    const success = await downloadService.cancel(paramId(req));
     res.json({ success });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -624,10 +649,10 @@ app.post('/api/downloads/:id/cancel', (req: Request, res: Response) => {
 });
 
 // 8. Demo Seed Helper (Allows immediate interactive trial with realistic mock CDN assets)
-app.post('/api/demo/seed', (_req: Request, res: Response) => {
+app.post('/api/demo/seed', async (_req: Request, res: Response) => {
   try {
     const demoSourceId = 'demo-cdn-store';
-    let demoSource = sourceRepo.getById(demoSourceId);
+    let demoSource = await sourceRepo.getById(demoSourceId);
 
     const downloadsDir = path.resolve(process.cwd(), 'downloads', 'demo-cdn-store');
     if (!fs.existsSync(downloadsDir)) {
@@ -652,7 +677,7 @@ app.post('/api/demo/seed', (_req: Request, res: Response) => {
         totalSize: 0,
         totalVideoDuration: 0,
       };
-      sourceRepo.insert(demoSource);
+      await sourceRepo.insert(demoSource);
     }
 
     // Populate realistic sample files across categories and video durations
@@ -871,7 +896,7 @@ app.post('/api/demo/seed', (_req: Request, res: Response) => {
       };
     });
 
-    fileRepo.upsertBatch(toInsert as any);
+    await fileRepo.upsertBatch(toInsert as any);
 
     const totalFiles = toInsert.length;
     const totalSize = toInsert.reduce((acc, f) => acc + f.size, 0);
@@ -886,7 +911,7 @@ app.post('/api/demo/seed', (_req: Request, res: Response) => {
       scanStatus: 'completed' as const,
       updatedAt: Date.now(),
     };
-    sourceRepo.update(updated);
+    await sourceRepo.update(updated);
 
     res.json({ success: true, message: 'Demo CDN library seeded successfully', source: updated });
   } catch (err: any) {
@@ -907,7 +932,19 @@ if (fs.existsSync(CLIENT_DIST)) {
 }
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`[Reelhouse Server] Running at http://localhost:${PORT}`);
-  console.log(`[Reelhouse Server] WebSocket ready at ws://localhost:${PORT}/ws`);
+
+// Schema and the one-time SQLite import must be done before serving requests
+async function start(): Promise<void> {
+  await initDatabase();
+  await importSqliteIfNeeded();
+  server.listen(PORT, () => {
+    console.log(`[Reelhouse Server] Using Postgres at ${redactUrl(DATABASE_URL)}`);
+    console.log(`[Reelhouse Server] Running at http://localhost:${PORT}`);
+    console.log(`[Reelhouse Server] WebSocket ready at ws://localhost:${PORT}/ws`);
+  });
+}
+
+start().catch((err) => {
+  console.error('[Reelhouse Server] Failed to start:', err.message);
+  process.exit(1);
 });

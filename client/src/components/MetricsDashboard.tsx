@@ -15,6 +15,8 @@ import {
   CheckCircle,
   AlertCircle,
   BarChart2,
+  FileText,
+  FileSpreadsheet,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -29,6 +31,7 @@ import {
   AreaChart,
   Area,
   CartesianGrid,
+  LabelList,
 } from 'recharts';
 import { ScanMetrics, StorageFile } from '../types';
 import { formatBytes, formatDuration, formatDate } from '../utils/formatters';
@@ -38,6 +41,19 @@ interface MetricsDashboardProps {
   onPreviewFile: (file: StorageFile) => void;
   onDownloadFile: (file: StorageFile) => void;
 }
+
+// Bars span very different magnitudes (e.g. 2,400 short clips vs 6 long webinars), so small
+// non-zero counts get a minimum height and every bar shows its count.
+const visibleMin = (value: number | null | undefined) => ((value ?? 0) > 0 ? 3 : 0);
+const countLabel = (
+  <LabelList
+    dataKey="count"
+    position="top"
+    fill="#cbd5e1"
+    fontSize={10}
+    formatter={(value: any) => (Number(value) > 0 ? Number(value).toLocaleString() : '')}
+  />
+);
 
 const CATEGORY_COLORS: Record<string, string> = {
   video: '#8b5cf6', // violet
@@ -99,6 +115,29 @@ export const MetricsDashboard: React.FC<MetricsDashboardProps> = ({
 
   return (
     <div className="space-y-8 pb-12">
+      {/* Export: printable report or per-file spreadsheet, generated on the server from the latest scan */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <span className="text-[11px] text-slate-500 mr-1">Export</span>
+        <a
+          href={`/api/sources/${encodeURIComponent(metrics.sourceId)}/report?format=html`}
+          download
+          title="Summary report with play time by folder. Open it in a browser and print to save as PDF."
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/80 transition-colors"
+        >
+          <FileText className="w-3.5 h-3.5 text-cyan-400" />
+          <span>Report (HTML)</span>
+        </a>
+        <a
+          href={`/api/sources/${encodeURIComponent(metrics.sourceId)}/report?format=csv`}
+          download
+          title="One row per file: path, size, dates, video length and resolution. Opens in Excel."
+          className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/80 transition-colors"
+        >
+          <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+          <span>File list (CSV)</span>
+        </a>
+      </div>
+
       {/* =========================================================================
           HERO CARDS SECTION
           ========================================================================= */}
@@ -276,15 +315,17 @@ export const MetricsDashboard: React.FC<MetricsDashboardProps> = ({
             </h3>
             <div className="h-48">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={resolutionData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <BarChart data={resolutionData} margin={{ top: 18, right: 10, left: -20, bottom: 20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                  <XAxis dataKey="resolution" tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                  <XAxis dataKey="resolution" tick={{ fill: '#94a3b8', fontSize: 9 }} interval={0} angle={-20} textAnchor="end" />
                   <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} allowDecimals={false} />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
                     labelStyle={{ color: '#f8fafc', fontWeight: 600 }}
                   />
-                  <Bar dataKey="count" fill="#06b6d4" radius={[4, 4, 0, 0]} name="Videos" />
+                  <Bar dataKey="count" fill="#06b6d4" radius={[4, 4, 0, 0]} name="Videos" minPointSize={visibleMin}>
+                    {countLabel}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -298,15 +339,17 @@ export const MetricsDashboard: React.FC<MetricsDashboardProps> = ({
             </h3>
             <div className="h-48">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={durationTierData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                <BarChart data={durationTierData} margin={{ top: 18, right: 10, left: -20, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
-                  <XAxis dataKey="tier" tick={{ fill: '#94a3b8', fontSize: 9 }} />
+                  <XAxis dataKey="tier" tick={{ fill: '#94a3b8', fontSize: 9 }} interval={0} />
                   <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} allowDecimals={false} />
                   <Tooltip
                     contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
                     labelStyle={{ color: '#f8fafc', fontWeight: 600 }}
                   />
-                  <Bar dataKey="count" fill="#8b5cf6" radius={[4, 4, 0, 0]} name="Videos" />
+                  <Bar dataKey="count" fill="#8b5cf6" radius={[4, 4, 0, 0]} name="Videos" minPointSize={visibleMin}>
+                    {countLabel}
+                  </Bar>
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -479,7 +522,7 @@ export const MetricsDashboard: React.FC<MetricsDashboardProps> = ({
 
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={sizeBucketData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
+              <BarChart data={sizeBucketData} margin={{ top: 18, right: 10, left: -20, bottom: 20 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
                 <XAxis dataKey="bucket" tick={{ fill: '#94a3b8', fontSize: 9 }} angle={-20} textAnchor="end" />
                 <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} allowDecimals={false} />
@@ -487,7 +530,9 @@ export const MetricsDashboard: React.FC<MetricsDashboardProps> = ({
                   contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px' }}
                   labelStyle={{ color: '#f8fafc', fontWeight: 600 }}
                 />
-                <Bar dataKey="count" fill="#10b981" radius={[4, 4, 0, 0]} name="File Count" />
+                <Bar dataKey="count" fill="#10b981" radius={[4, 4, 0, 0]} name="File Count" minPointSize={visibleMin}>
+                  {countLabel}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>

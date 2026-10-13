@@ -1,23 +1,23 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { db, sourceRepo } from '../db.js';
+import { query, queryOne, sourceRepo } from '../db.js';
 import { StorageSource, ScanMetrics, FileCategory, StorageFile } from '../types.js';
 import { formatBytes, formatDuration } from '../utils/formatters.js';
 
 export class MetricsService {
-  public computeMetrics(sourceId: string): ScanMetrics | null {
-    const source = sourceRepo.getById(sourceId);
+  public async computeMetrics(sourceId: string): Promise<ScanMetrics | null> {
+    const source = await sourceRepo.getById(sourceId);
     if (!source) return null;
 
     // 1. Overall stats
-    const statsRow = db.prepare(`
+    const statsRow = (await queryOne(`
       SELECT
         COUNT(*) as total_files,
         COALESCE(SUM(size), 0) as total_size,
         COALESCE(AVG(size), 0) as avg_size
       FROM files
       WHERE source_id = ?
-    `).get(sourceId) as any;
+    `, [sourceId])) as any;
 
     const totalFiles = statsRow.total_files || 0;
     const totalSize = statsRow.total_size || 0;
@@ -26,17 +26,18 @@ export class MetricsService {
     // Median size
     let medianFileSize = 0;
     if (totalFiles > 0) {
-      const medianRow = db.prepare(`
+      const MEDIAN_OFFSET = Math.floor(totalFiles / 2);
+      const medianRow = (await queryOne(`
         SELECT size FROM files
         WHERE source_id = ?
         ORDER BY size ASC
         LIMIT 1 OFFSET ?
-      `).get(sourceId, Math.floor(totalFiles / 2)) as any;
+      `, [sourceId, MEDIAN_OFFSET])) as any;
       if (medianRow) medianFileSize = medianRow.size;
     }
 
     // 2. Video Metrics (Duration, Resolutions, Codecs, Buckets)
-    const videoStatsRow = db.prepare(`
+    const videoStatsRow = (await queryOne(`
       SELECT
         COUNT(*) as video_count,
         COALESCE(SUM(size), 0) as total_video_size,
@@ -44,7 +45,7 @@ export class MetricsService {
         COALESCE(AVG(duration), 0) as avg_video_duration
       FROM files
       WHERE source_id = ? AND category = 'video'
-    `).get(sourceId) as any;
+    `, [sourceId])) as any;
 
     const totalVideoDuration = videoStatsRow.total_video_duration || 0;
     const videoCount = videoStatsRow.video_count || 0;
@@ -52,10 +53,10 @@ export class MetricsService {
     const avgVideoDuration = Math.round(videoStatsRow.avg_video_duration || 0);
 
     // Resolution buckets for video
-    const videoResolutionRows = db.prepare(`
+    const videoResolutionRows = (await query(`
       SELECT width, height FROM files
       WHERE source_id = ? AND category = 'video' AND width IS NOT NULL AND height IS NOT NULL
-    `).all(sourceId) as Array<{ width: number; height: number }>;
+    `, [sourceId])) as Array<{ width: number; height: number }>;
 
     const resolutionBuckets = {
       '4K UHD (2160p)': 0,
@@ -96,10 +97,10 @@ export class MetricsService {
       '> 1 hour': 0,
     };
 
-    const videoDurations = db.prepare(`
+    const videoDurations = (await query(`
       SELECT duration FROM files
       WHERE source_id = ? AND category = 'video' AND duration > 0
-    `).all(sourceId) as Array<{ duration: number }>;
+    `, [sourceId])) as Array<{ duration: number }>;
 
     for (const { duration } of videoDurations) {
       if (duration < 60) durationBuckets['< 1 min']++;
@@ -111,13 +112,13 @@ export class MetricsService {
     }
 
     // Video container formats
-    const videoFormatsRows = db.prepare(`
+    const videoFormatsRows = (await query(`
       SELECT extension, COUNT(*) as count, SUM(size) as total_size
       FROM files
       WHERE source_id = ? AND category = 'video'
       GROUP BY extension
       ORDER BY count DESC
-    `).all(sourceId) as Array<{ extension: string; count: number; total_size: number }>;
+    `, [sourceId])) as Array<{ extension: string; count: number; total_size: number }>;
 
     const containerFormats: Record<string, { count: number; totalSize: number }> = {};
     for (const r of videoFormatsRows) {
@@ -126,13 +127,13 @@ export class MetricsService {
     }
 
     // Video codecs
-    const videoCodecRows = db.prepare(`
+    const videoCodecRows = (await query(`
       SELECT COALESCE(codec, 'Unknown') as codec, COUNT(*) as count, SUM(size) as total_size
       FROM files
       WHERE source_id = ? AND category = 'video'
       GROUP BY codec
       ORDER BY count DESC
-    `).all(sourceId) as Array<{ codec: string; count: number; total_size: number }>;
+    `, [sourceId])) as Array<{ codec: string; count: number; total_size: number }>;
 
     const videoCodecs: Record<string, { count: number; totalSize: number }> = {};
     for (const r of videoCodecRows) {
@@ -140,12 +141,12 @@ export class MetricsService {
     }
 
     // 3. Category Distribution
-    const categoryRows = db.prepare(`
+    const categoryRows = (await query(`
       SELECT category, COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
       FROM files
       WHERE source_id = ?
       GROUP BY category
-    `).all(sourceId) as Array<{ category: FileCategory; count: number; total_size: number }>;
+    `, [sourceId])) as Array<{ category: FileCategory; count: number; total_size: number }>;
 
     const categories: Record<FileCategory, any> = {
       video: { count: 0, totalSize: 0, formattedSize: '0 B', percentSize: 0, percentCount: 0 },
@@ -170,14 +171,14 @@ export class MetricsService {
     }
 
     // 4. File extension distribution
-    const topExtensionsRows = db.prepare(`
+    const topExtensionsRows = (await query(`
       SELECT extension, COUNT(*) as count, SUM(size) as total_size
       FROM files
       WHERE source_id = ?
       GROUP BY extension
       ORDER BY total_size DESC
       LIMIT 10
-    `).all(sourceId) as Array<{ extension: string; count: number; total_size: number }>;
+    `, [sourceId])) as Array<{ extension: string; count: number; total_size: number }>;
 
     const topExtensions = topExtensionsRows.map((r) => ({
       extension: r.extension || 'none',
@@ -196,7 +197,7 @@ export class MetricsService {
       '> 10 GB': 0,
     };
 
-    const sizeRows = db.prepare('SELECT size FROM files WHERE source_id = ?').all(sourceId) as Array<{ size: number }>;
+    const sizeRows = (await query('SELECT size FROM files WHERE source_id = ?', [sourceId])) as Array<{ size: number }>;
     for (const { size } of sizeRows) {
       if (size < 100 * 1024) sizeBuckets['< 100 KB']++;
       else if (size < 1024 * 1024) sizeBuckets['100 KB - 1 MB']++;
@@ -220,7 +221,7 @@ export class MetricsService {
       '> 1 Year': 0,
     };
 
-    const mtimeRows = db.prepare('SELECT last_modified FROM files WHERE source_id = ?').all(sourceId) as Array<{ last_modified: number }>;
+    const mtimeRows = (await query('SELECT last_modified FROM files WHERE source_id = ?', [sourceId])) as Array<{ last_modified: number }>;
     for (const { last_modified } of mtimeRows) {
       const ageMs = now - last_modified;
       if (ageMs < day) ageBuckets['Past 24 Hours']++;
@@ -234,7 +235,7 @@ export class MetricsService {
 
     // Monthly ingestion timeline (formatted YYYY-MM)
     const monthlyMap = new Map<string, { count: number; totalSize: number }>();
-    const filesWithMtime = db.prepare('SELECT last_modified, size FROM files WHERE source_id = ? ORDER BY last_modified ASC').all(sourceId) as Array<{ last_modified: number; size: number }>;
+    const filesWithMtime = (await query('SELECT last_modified, size FROM files WHERE source_id = ? ORDER BY last_modified ASC', [sourceId])) as Array<{ last_modified: number; size: number }>;
 
     for (const item of filesWithMtime) {
       const date = new Date(item.last_modified);
@@ -252,24 +253,24 @@ export class MetricsService {
     }));
 
     // Oldest and Newest file
-    const oldestRow = db.prepare('SELECT key, last_modified, size FROM files WHERE source_id = ? ORDER BY last_modified ASC LIMIT 1').get(sourceId) as any;
-    const newestRow = db.prepare('SELECT key, last_modified, size FROM files WHERE source_id = ? ORDER BY last_modified DESC LIMIT 1').get(sourceId) as any;
+    const oldestRow = (await queryOne('SELECT key, last_modified, size FROM files WHERE source_id = ? ORDER BY last_modified ASC LIMIT 1', [sourceId])) as any;
+    const newestRow = (await queryOne('SELECT key, last_modified, size FROM files WHERE source_id = ? ORDER BY last_modified DESC LIMIT 1', [sourceId])) as any;
 
     const oldestFile = oldestRow ? { key: oldestRow.key, date: oldestRow.last_modified, size: oldestRow.size } : undefined;
     const newestFile = newestRow ? { key: newestRow.key, date: newestRow.last_modified, size: newestRow.size } : undefined;
 
     // 7. Top Lists
-    const largestFilesRows = db.prepare('SELECT * FROM files WHERE source_id = ? ORDER BY size DESC LIMIT 15').all(sourceId) as any[];
-    const longestVideosRows = db.prepare("SELECT * FROM files WHERE source_id = ? AND category = 'video' AND duration > 0 ORDER BY duration DESC LIMIT 15").all(sourceId) as any[];
-    const recentlyModifiedRows = db.prepare('SELECT * FROM files WHERE source_id = ? ORDER BY last_modified DESC LIMIT 15').all(sourceId) as any[];
+    const largestFilesRows = (await query('SELECT * FROM files WHERE source_id = ? ORDER BY size DESC LIMIT 15', [sourceId])) as any[];
+    const longestVideosRows = (await query("SELECT * FROM files WHERE source_id = ? AND category = 'video' AND duration > 0 ORDER BY duration DESC LIMIT 15", [sourceId])) as any[];
+    const recentlyModifiedRows = (await query('SELECT * FROM files WHERE source_id = ? ORDER BY last_modified DESC LIMIT 15', [sourceId])) as any[];
 
     // 8. On-Premise Box Synchronization
-    const syncRows = db.prepare(`
+    const syncRows = (await query(`
       SELECT local_status, COUNT(*) as count, COALESCE(SUM(size), 0) as total_size
       FROM files
       WHERE source_id = ?
       GROUP BY local_status
-    `).all(sourceId) as Array<{ local_status: string; count: number; total_size: number }>;
+    `, [sourceId])) as Array<{ local_status: string; count: number; total_size: number }>;
 
     let syncedFilesCount = 0;
     let syncedSize = 0;
