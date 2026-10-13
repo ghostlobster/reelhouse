@@ -232,14 +232,15 @@ export const App: React.FC = () => {
   }, [activeSource]);
 
   // Actions
-  const handleTriggerScan = async () => {
+  // Quick scan lists files only; deep scan also reads video/audio length from each new or changed file
+  const handleTriggerScan = async (deep: boolean) => {
     if (!activeSource) return;
     setIsScanning(true);
     try {
       await fetch(`/api/sources/${activeSource.id}/scan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deepMediaScan: true }),
+        body: JSON.stringify({ deepMediaScan: deep }),
       });
     } catch (err) {
       console.error('Scan trigger error:', err);
@@ -533,14 +534,25 @@ export const App: React.FC = () => {
                 ) : (
                   <div className="py-16 text-center space-y-4 bg-slate-900/40 rounded-2xl border border-slate-800">
                     <div className="text-sm text-slate-400">
-                      No metrics found for this source yet.
+                      This source hasn't been scanned yet.
                     </div>
-                    <button
-                      onClick={handleTriggerScan}
-                      className="px-5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold shadow-md transition-all"
-                    >
-                      Run Initial Scan
-                    </button>
+                    <div className="flex flex-wrap items-center justify-center gap-3">
+                      <button
+                        onClick={() => handleTriggerScan(false)}
+                        className="px-5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold shadow-md transition-all"
+                      >
+                        Run Quick Scan
+                      </button>
+                      <button
+                        onClick={() => handleTriggerScan(true)}
+                        className="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-all"
+                      >
+                        Deep Scan (with video lengths)
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      Quick scan lists files, sizes and dates. Deep scan also measures each video, which is slower over FTP.
+                    </p>
                   </div>
                 )}
               </div>
@@ -580,7 +592,7 @@ export const App: React.FC = () => {
                 source={activeSource}
                 metrics={metrics}
                 onDownloadMissing={handleDownloadMissing}
-                onTriggerScan={handleTriggerScan}
+                onTriggerScan={() => handleTriggerScan(false)}
                 onPreviewFile={setPreviewFile}
               />
             )}
@@ -597,6 +609,7 @@ export const App: React.FC = () => {
             {/* TAB: SETTINGS */}
             {activeTab === 'settings' && (
               <SourceSettings
+                key={activeSource.id}
                 source={activeSource}
                 onUpdateSource={handleUpdateSource}
                 onDeleteSource={handleDeleteSource}

@@ -9,15 +9,32 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'node:stream';
 import { StorageSource } from '../types.js';
+import { sftpStorage } from './sftpStorage.js';
+import { ftpStorage } from './ftpStorage.js';
+import { FileServerBackend, isFileServerSource, parseFileEndpoint } from './remoteFs.js';
+
+/** FTP/FTPS/SFTP backend for file-server sources (KeyCDN), or undefined for S3 sources. */
+function fileServerFor(source: StorageSource): FileServerBackend | undefined {
+  if (!isFileServerSource(source)) return undefined;
+  return parseFileEndpoint(source.endpoint).protocol === 'sftp' ? sftpStorage : ftpStorage;
+}
 
 export class StorageService {
-  private clientCache = new Map<string, S3Client>();
+  // One client per source, rebuilt only when its connection settings change
+  private clientCache = new Map<string, { signature: string; client: S3Client }>();
 
   public getClient(source: StorageSource): S3Client {
-    const cacheKey = `${source.id}-${source.updatedAt}`;
-    if (this.clientCache.has(cacheKey)) {
-      return this.clientCache.get(cacheKey)!;
-    }
+    const signature = JSON.stringify([
+      source.provider,
+      source.endpoint,
+      source.region,
+      source.forcePathStyle,
+      source.accessKey,
+      source.secretKey,
+    ]);
+    const cached = this.clientCache.get(source.id);
+    if (cached?.signature === signature) return cached.client;
+    cached?.client.destroy();
 
     let endpoint = source.endpoint?.trim();
     let region = source.region?.trim() || 'us-east-1';
@@ -31,9 +48,6 @@ export class StorageService {
       }
     } else if (source.provider === 'minio') {
       forcePathStyle = true;
-    } else if (source.provider === 'keycdn') {
-      // KeyCDN S3 endpoints
-      if (!endpoint) endpoint = 'https://s3.keycdn.com';
     } else if (source.provider === 'wasabi') {
       if (!endpoint) endpoint = `https://s3.${region}.wasabisys.com`;
     }
@@ -51,12 +65,15 @@ export class StorageService {
           : undefined,
     });
 
-    this.clientCache.set(cacheKey, client);
+    this.clientCache.set(source.id, { signature, client });
     return client;
   }
 
   public async testConnection(source: StorageSource): Promise<{ success: boolean; message: string; sampleCount?: number }> {
     try {
+      const fileServer = fileServerFor(source);
+      if (fileServer) return await fileServer.testConnection(source);
+
       const client = this.getClient(source);
       
       // Try listing up to 5 items to verify both auth and bucket access
@@ -90,6 +107,8 @@ export class StorageService {
     nextContinuationToken?: string;
     isTruncated: boolean;
   }> {
+    const fileServer = fileServerFor(source);
+    if (fileServer) return fileServer.listPage(source, continuationToken, prefix, maxKeys);
     const client = this.getClient(source);
     const command = new ListObjectsV2Command({
       Bucket: source.bucket,
@@ -155,6 +174,9 @@ export class StorageService {
       };
     }
 
+    const fileServer = fileServerFor(source);
+    if (fileServer) return fileServer.getObjectStream(source, key, range);
+
     const client = this.getClient(source);
     const command = new GetObjectCommand({
       Bucket: source.bucket,
@@ -187,6 +209,8 @@ export class StorageService {
   }
 
   public async getPresignedUrl(source: StorageSource, key: string, expiresInSeconds: number = 3600): Promise<string> {
+    // File servers have no signed URLs; fall back to the streaming proxy
+    if (isFileServerSource(source)) return this.getResolvedUrl(source, key);
     const client = this.getClient(source);
     const command = new GetObjectCommand({
       Bucket: source.bucket,

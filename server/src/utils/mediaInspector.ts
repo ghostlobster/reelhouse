@@ -35,6 +35,18 @@ function parseMp4Buffer(buffer: Buffer): ExtractedMediaInfo | null {
 
       offset += boxSize;
     }
+
+    // A tail probe starts mid-file (usually inside mdat), so the box walk above lands on
+    // garbage. Fall back to locating the moov header directly.
+    let idx = buffer.indexOf('moov', 4, 'ascii');
+    while (idx !== -1) {
+      const start = idx - 4;
+      const size = buffer.readUInt32BE(start);
+      if (size >= 16 && start + size <= buffer.length && buffer.toString('ascii', idx + 8, idx + 12) === 'mvhd') {
+        return parseMoovBox(buffer.subarray(idx + 4, start + size));
+      }
+      idx = buffer.indexOf('moov', idx + 4, 'ascii');
+    }
   } catch (err) {
     // Ignore buffer parse errors
   }

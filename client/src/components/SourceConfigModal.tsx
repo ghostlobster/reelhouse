@@ -1,12 +1,9 @@
 import React, { useState } from 'react';
 import {
   X,
-  Check,
-  AlertCircle,
   HardDrive,
   Cloud,
   Shield,
-  Key,
   Globe,
   Database,
   HelpCircle,
@@ -14,6 +11,15 @@ import {
 } from 'lucide-react';
 import { StorageSource, StorageProvider } from '../types';
 import { getSuggestedDownloadPath } from '../utils/downloadPath';
+import {
+  SourceConnectionFields,
+  ConnectionDraft,
+  ConnectionTestBanner,
+  draftFromSource,
+  connectionPayload,
+  isConnectionComplete,
+  testConnection,
+} from './SourceConnectionFields';
 
 interface SourceConfigModalProps {
   isOpen: boolean;
@@ -57,10 +63,10 @@ const PROVIDER_PRESETS: Array<{
   {
     id: 'keycdn',
     name: 'KeyCDN',
-    defaultEndpoint: 'https://s3.keycdn.com',
-    defaultRegion: 'us-east-1',
+    defaultEndpoint: '',
+    defaultRegion: '',
     forcePathStyle: false,
-    desc: 'KeyCDN Storage Zones with HTTP/S3 origin support',
+    desc: 'KeyCDN Storage Zones over FTPS',
   },
   {
     id: 'wasabi',
@@ -94,14 +100,8 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
   onSave,
   initialSource,
 }) => {
-  const [provider, setProvider] = useState<StorageProvider>(initialSource?.provider || 'aws');
   const [name, setName] = useState(initialSource?.name || '');
-  const [endpoint, setEndpoint] = useState(initialSource?.endpoint || 'https://s3.us-east-1.amazonaws.com');
-  const [bucket, setBucket] = useState(initialSource?.bucket || '');
-  const [region, setRegion] = useState(initialSource?.region || 'us-east-1');
-  const [accessKey, setAccessKey] = useState(initialSource?.accessKey || '');
-  const [secretKey, setSecretKey] = useState(initialSource?.secretKey || '');
-  const [forcePathStyle, setForcePathStyle] = useState(initialSource?.forcePathStyle ?? false);
+  const [connection, setConnection] = useState<ConnectionDraft>(() => draftFromSource(initialSource));
   const [cdnUrl, setCdnUrl] = useState(initialSource?.cdnUrl || '');
   const [localPath, setLocalPath] = useState(initialSource?.localPath || '');
   const [readOnly, setReadOnly] = useState(initialSource?.readOnly !== false);
@@ -112,59 +112,35 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
 
   if (!isOpen) return null;
 
+  const provider = connection.provider;
+  const updateConnection = (patch: Partial<ConnectionDraft>) => setConnection((prev) => ({ ...prev, ...patch }));
+
   const handleProviderSelect = (p: StorageProvider) => {
-    setProvider(p);
     const preset = PROVIDER_PRESETS.find((pr) => pr.id === p);
-    if (preset) {
-      if (!initialSource) {
-        setEndpoint(preset.defaultEndpoint);
-        setRegion(preset.defaultRegion);
-        setForcePathStyle(preset.forcePathStyle);
-      }
-    }
+    updateConnection(
+      preset && !initialSource
+        ? { provider: p, endpoint: preset.defaultEndpoint, region: preset.defaultRegion, forcePathStyle: preset.forcePathStyle }
+        : { provider: p }
+    );
+    setTestResult(null);
   };
 
   const handleTestConnection = async () => {
     setTesting(true);
     setTestResult(null);
-    try {
-      const res = await fetch('/api/sources/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider,
-          endpoint,
-          bucket,
-          region,
-          accessKey,
-          secretKey,
-          forcePathStyle,
-        }),
-      });
-      const data = await res.json();
-      setTestResult(data);
-    } catch (err: any) {
-      setTestResult({ success: false, message: err.message || 'Connection test failed' });
-    } finally {
-      setTesting(false);
-    }
+    setTestResult(await testConnection(connection));
+    setTesting(false);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !bucket.trim()) return;
+    if (!name.trim() || !isConnectionComplete(connection)) return;
 
     setSaving(true);
     try {
       await onSave({
         name,
-        provider,
-        endpoint,
-        bucket,
-        region,
-        accessKey,
-        secretKey,
-        forcePathStyle,
+        ...connectionPayload(connection),
         cdnUrl,
         localPath: localPath.trim() || undefined,
         readOnly,
@@ -232,94 +208,25 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
             </div>
           </div>
 
-          {/* Source Friendly Name & Bucket */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Source Display Name *
-              </label>
-              <input
-                type="text"
-                required
-                placeholder="e.g. Production Media CDN"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Bucket / Zone Name *
-              </label>
-              <input
-                type="text"
-                required
-                placeholder="e.g. video-assets-bucket"
-                value={bucket}
-                onChange={(e) => setBucket(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-          </div>
-
-          {/* Endpoint URL & Region */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Endpoint URL
-              </label>
-              <input
-                type="text"
-                placeholder="https://s3.us-east-1.amazonaws.com"
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-              <span className="text-[10px] text-slate-500 mt-0.5 block">
-                Leave blank for standard AWS S3, or provide custom MinIO / R2 / Wasabi endpoint.
-              </span>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Region</label>
-              <input
-                type="text"
-                placeholder="us-east-1 or auto"
-                value={region}
-                onChange={(e) => setRegion(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-          </div>
-
-          {/* Credentials */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <Key className="w-3.5 h-3.5 text-cyan-400" />
-                Access Key ID
-              </label>
-              <input
-                type="text"
-                placeholder="AKIA..."
-                value={accessKey}
-                onChange={(e) => setAccessKey(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1 flex items-center gap-1.5">
-                <Key className="w-3.5 h-3.5 text-cyan-400" />
-                Secret Access Key
-              </label>
-              <input
-                type="password"
-                placeholder="••••••••••••••••"
-                value={secretKey}
-                onChange={(e) => setSecretKey(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50 font-mono"
-              />
-            </div>
-          </div>
+          <SourceConnectionFields
+            draft={connection}
+            onChange={updateConnection}
+            nameField={
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Source Display Name *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Production Media CDN"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+                />
+              </div>
+            }
+          />
 
           {/* Public CDN URL & On-Premise Target Path */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -372,16 +279,6 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
             <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300 select-none">
               <input
                 type="checkbox"
-                checked={forcePathStyle}
-                onChange={(e) => setForcePathStyle(e.target.checked)}
-                className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0"
-              />
-              <span>Force Path Style Addressing (Required for MinIO / self-hosted)</span>
-            </label>
-
-            <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300 select-none">
-              <input
-                type="checkbox"
                 checked={readOnly}
                 onChange={(e) => setReadOnly(e.target.checked)}
                 className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-0"
@@ -393,29 +290,13 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
             </label>
           </div>
 
-          {/* Connection Test Banner */}
-          {testResult && (
-            <div
-              className={`p-3 rounded-xl border flex items-center gap-2.5 text-xs ${
-                testResult.success
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                  : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-              }`}
-            >
-              {testResult.success ? (
-                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-              ) : (
-                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-              )}
-              <span>{testResult.message}</span>
-            </div>
-          )}
+          <ConnectionTestBanner result={testResult} />
 
           {/* Footer Actions */}
           <div className="flex items-center justify-between pt-4 border-t border-slate-800">
             <button
               type="button"
-              disabled={testing || !bucket}
+              disabled={testing || !isConnectionComplete(connection)}
               onClick={handleTestConnection}
               className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-2 transition-all disabled:opacity-50"
             >
@@ -433,7 +314,7 @@ export const SourceConfigModal: React.FC<SourceConfigModalProps> = ({
               </button>
               <button
                 type="submit"
-                disabled={saving || !name || !bucket}
+                disabled={saving || !name || !isConnectionComplete(connection)}
                 className="px-5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-bold shadow-lg shadow-cyan-500/20 transition-all disabled:opacity-50"
               >
                 {saving ? 'Saving...' : initialSource ? 'Update Source' : 'Connect Source'}

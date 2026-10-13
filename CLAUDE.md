@@ -8,7 +8,7 @@ Reelhouse: a self-hosted dashboard that scans S3-compatible buckets (AWS, R2, Mi
 
 ## Commands
 
-Run from the repo root unless noted.
+Run from the repo root unless noted. The server needs Postgres: `docker compose up -d postgres` starts the one it expects (localhost:5435). `docker compose up -d --build` runs the whole app at http://127.0.0.1:3010.
 
 - `npm run dev`: API server (tsx, port 3001) plus Vite dev server (port 5173, proxies `/api` and `/ws` to 3001). Use http://localhost:5173.
 - `npm run server`: API server only. It also serves `client/dist` if that folder has been built, so http://localhost:3001 works as a production setup.
@@ -16,9 +16,9 @@ Run from the repo root unless noted.
 - Typecheck the server: `npx tsc --noEmit -p .` (the root `tsconfig.json` covers only `server/src`).
 - Typecheck the client: `cd client && npx tsc --noEmit -p tsconfig.json`.
 
-There is no test suite and no linter. Verify server changes by running the server and hitting endpoints with curl. The server creates `data/` (SQLite) and `downloads/` relative to the **current working directory**. To experiment without touching the real DB, start it from a scratch directory: `PORT=3999 node <repo>/node_modules/tsx/dist/cli.mjs <repo>/server/src/index.ts`. The UI's "Load Demo CDN Library" button (`POST /api/demo/seed`) adds a demo source with sample files.
+There is no test suite and no linter. Verify server changes by running the server and hitting endpoints with curl. The server creates `downloads/` relative to the **current working directory**. To experiment without touching the real data, point it at a throwaway Postgres (`docker run -d -p 127.0.0.1:5499:5432 -e POSTGRES_DB=reelhouse -e POSTGRES_USER=reelhouse -e POSTGRES_PASSWORD=test postgres:17-alpine`) and start it from a scratch directory: `DATABASE_URL=postgres://reelhouse:test@127.0.0.1:5499/reelhouse PORT=3999 node <repo>/node_modules/tsx/dist/cli.mjs <repo>/server/src/index.ts`. The UI's "Load Demo CDN Library" button (`POST /api/demo/seed`) adds a demo source with sample files.
 
-Environment variables: `PORT` (default 3001) and `CORS_ORIGINS` (comma-separated; default `http://localhost:5173,http://127.0.0.1:5173`).
+Environment variables: `PORT` (default 3001), `DATABASE_URL` (default `postgres://reelhouse:reelhouse@localhost:5435/reelhouse`), `SQLITE_IMPORT_PATH` (optional, see below) and `CORS_ORIGINS` (comma-separated; default `http://localhost:5173,http://127.0.0.1:5173`).
 
 ## Architecture
 
@@ -27,7 +27,8 @@ Two packages: the root is the Express server (`server/src`, CommonJS project run
 ### Server (`server/src`)
 
 - `index.ts`: the entire HTTP API (Express 5) plus the WebSocket server at `/ws`. Routes call the repos and services directly; there are no route modules. Also holds the request-validation helpers (`parseDirectoryPath`, `sendError`, `findLocalCopy`).
-- `db.ts`: better-sqlite3 schema and repositories (`sourceRepo`, `fileRepo`, `downloadRepo`). Schema changes go in the "safe migrations" block as `try { ALTER TABLE ... } catch {}`, because existing databases are never recreated. Rows are mapped from snake_case columns to camelCase objects in the `map*Row` functions.
+- `db.ts`: Postgres (`pg`) pool, schema and async repositories (`sourceRepo`, `fileRepo`, `downloadRepo`). SQL is written with `?` placeholders; `query()` numbers them for Postgres. Schema changes must be idempotent statements in `SCHEMA` (`CREATE ... IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`), because existing databases are never recreated. Quote camelCase column aliases (`AS "playTime"`): Postgres lowercases unquoted names. `files.key` uses the `"C"` collation so ordering and prefix `LIKE` behave byte-wise. BIGINT and NUMERIC results are parsed to JS numbers. Rows are mapped from snake_case columns to camelCase objects in the `map*Row` functions.
+- `sqliteImport.ts`: one-time import of the old SQLite database (`data/reelhouse.db`, or `SQLITE_IMPORT_PATH`) at startup, recorded in the `app_meta` table so it never runs twice. The SQLite file is left in place as a backup.
 - `services/storageService.ts`: S3 client per source, including provider-specific endpoint defaults, listing, range reads, presigned URLs.
 - `services/scannerService.ts`: lists the bucket page by page, upserts `files` rows, checks whether each object already exists locally, and (on a deep scan) extracts media duration and resolution. It reads a local copy when one is synced, otherwise it probes the remote object with a Range request (`utils/mediaInspector.ts`: a hand-written MP4 box parser plus music-metadata).
 - `services/downloadService.ts`: in-memory queue (concurrency 3) writing to a temp file and renaming it when complete. Every download belongs to a `download_batches` row (types: manual_batch, date_range, sync_all, folder). On completion the file is marked `synced` and its actual path is stored in `files.local_file_path`.

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { storageService } from './storageService.js';
-import { db, sourceRepo, fileRepo } from '../db.js';
+import { query, sourceRepo, fileRepo } from '../db.js';
 import { StorageSource, StorageFile } from '../types.js';
 import { detectCategory } from '../utils/formatters.js';
 import { inspectMediaBuffer, inspectLocalMediaFile } from '../utils/mediaInspector.js';
@@ -50,7 +50,6 @@ export class ScannerService {
     }
 
     this.activeScans.add(source.id);
-    sourceRepo.updateScanStatus(source.id, 'scanning');
 
     const scanStartTime = Date.now();
     let scannedFiles = 0;
@@ -60,10 +59,18 @@ export class ScannerService {
     const discoveredKeys: string[] = [];
 
     const historyId = `scan-${Date.now()}`;
-    db.prepare(`
-      INSERT INTO scan_history (id, source_id, started_at, status)
-      VALUES (?, ?, ?, 'running')
-    `).run(historyId, source.id, scanStartTime);
+    try {
+      await sourceRepo.updateScanStatus(source.id, 'scanning');
+      await query(`INSERT INTO scan_history (id, source_id, started_at, status) VALUES (?, ?, ?, 'running')`, [
+        historyId,
+        source.id,
+        scanStartTime,
+      ]);
+    } catch (err) {
+      // Release the source, or it would look "already scanning" forever
+      this.activeScans.delete(source.id);
+      throw err;
+    }
 
     try {
       this.broadcast({
@@ -81,6 +88,11 @@ export class ScannerService {
       do {
         const page = await storageService.listPage(source, continuationToken, undefined, 1000);
         continuationToken = page.nextContinuationToken;
+        // Existing rows for this page in one query, instead of one lookup per file
+        const existingByKey = await fileRepo.getByKeys(
+          source.id,
+          page.objects.map((o) => o.Key).filter((k): k is string => Boolean(k))
+        );
 
         for (const obj of page.objects) {
           if (!obj.Key || obj.Key.endsWith('/')) {
@@ -104,7 +116,7 @@ export class ScannerService {
           let localMtime: number | undefined = undefined;
           let localFilePath: string | undefined = undefined;
 
-          const existingFile = fileRepo.getByKey(source.id, key);
+          const existingFile = existingByKey.get(key);
 
           // Prefer the source's default directory, then wherever the file was last downloaded to
           const candidatePaths = [
@@ -217,7 +229,7 @@ export class ScannerService {
           batch.push(fileItem);
 
           if (batch.length >= 250) {
-            fileRepo.upsertBatch(batch);
+            await fileRepo.upsertBatch(batch);
             batch = [];
           }
 
@@ -232,32 +244,38 @@ export class ScannerService {
             });
           }
         }
+
+        // Report after every page too: file-server listings return small pages while walking folders
+        this.broadcast({
+          sourceId: source.id,
+          status: 'scanning',
+          scannedFiles,
+          totalSize,
+          totalVideoDuration,
+        });
       } while (continuationToken);
 
       // Flush remaining batch
       if (batch.length > 0) {
-        fileRepo.upsertBatch(batch);
+        await fileRepo.upsertBatch(batch);
         batch = [];
       }
 
-      // Update source statistics
-      const updatedSource: StorageSource = {
-        ...source,
+      // Update source statistics (only the totals: settings may have been edited during the scan)
+      await sourceRepo.finishScan(source.id, {
         totalFiles: scannedFiles,
         totalSize,
         totalVideoDuration,
         lastScannedAt: Date.now(),
-        scanStatus: 'completed',
-        updatedAt: Date.now(),
-      };
-      sourceRepo.update(updatedSource);
+      });
 
       // Finish history
-      db.prepare(`
-        UPDATE scan_history
+      await query(
+        `UPDATE scan_history
         SET completed_at = ?, status = 'completed', files_count = ?, total_size = ?, video_duration_seconds = ?
-        WHERE id = ?
-      `).run(Date.now(), scannedFiles, totalSize, totalVideoDuration, historyId);
+        WHERE id = ?`,
+        [Date.now(), scannedFiles, totalSize, totalVideoDuration, historyId]
+      );
 
       this.broadcast({
         sourceId: source.id,
@@ -269,12 +287,13 @@ export class ScannerService {
       });
     } catch (err: any) {
       console.error(`Scan failed for source ${source.name}:`, err);
-      sourceRepo.updateScanStatus(source.id, 'failed');
-      db.prepare(`
-        UPDATE scan_history
-        SET completed_at = ?, status = 'failed', error = ?
-        WHERE id = ?
-      `).run(Date.now(), err.message || 'Scan error', historyId);
+      // Don't let a database error here hide the scan error
+      await sourceRepo.updateScanStatus(source.id, 'failed').catch(() => {});
+      await query(`UPDATE scan_history SET completed_at = ?, status = 'failed', error = ? WHERE id = ?`, [
+        Date.now(),
+        err.message || 'Scan error',
+        historyId,
+      ]).catch(() => {});
 
       this.broadcast({
         sourceId: source.id,
